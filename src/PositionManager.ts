@@ -2,14 +2,6 @@ import BN from "bn.js";
 import BigNumber from "bignumber.js";
 import invariant from "tiny-invariant";
 import { Transaction, TransactionResult } from "@mysten/sui/transactions";
-// FlowX Aggregator imports - used for swap routing, not CLMM positions
-import {
-  AggregatorQuoter,
-  TradeBuilder,
-  GetRoutesResult,
-  Commission,
-  CommissionType,
-} from "@flowx-finance/sdk";
 import {
   BPS,
   Percent,
@@ -29,8 +21,6 @@ import { PriceProvider } from "./entities";
 import { convertAmountToDecimalAmount, getToken } from "./utils/tokenHelper";
 import { refundTokensIfNecessary } from "./utils/tokenHelper";
 
-const ZERO_COMMISSION = 0;
-
 interface RebalancerConstructorArgs {
   slippageTolerance: Percent;
   priceImpactPercentThreshold?: Percent;
@@ -44,7 +34,6 @@ export class PositionManager {
   private slippageTolerance: Percent;
   private priceImpactPercentThreshold?: Percent;
   private minZapAmounts: { amountX: BN; amountY: BN };
-  private quoter: AggregatorQuoter;
   private priceProvider: PriceProvider;
   private rewardThresholdUsd?: BN;
   private trackingVolumeAddress?: string;
@@ -68,26 +57,32 @@ export class PositionManager {
       "slippageTolerance must be between 0 and 1"
     );
 
-    this.quoter = new AggregatorQuoter("mainnet");
     this.priceProvider = priceProvider ?? new AggregatorPriceProvider();
   }
 
-  private async checkPriceImpact(quote: GetRoutesResult<Coin, Coin>) {
+  // TODO: Implement swap routing using Cetus SDK Router for reward compounding
+  // For now, rewards are collected but not swapped
+  private async checkPriceImpact(
+    tokenInType: string,
+    tokenOutType: string,
+    amountIn: BN,
+    amountOut: BN
+  ) {
     const [tokenIn, tokenOut] = await Promise.all([
-      getToken(quote.coinIn.coinType),
-      getToken(quote.coinOut.coinType),
+      getToken(tokenInType),
+      getToken(tokenOutType),
     ]);
 
     const [tokenInPriceUSD, tokenOutPriceUSD] = await Promise.all([
-      this.priceProvider.getPrice(quote.coinIn.coinType),
-      this.priceProvider.getPrice(quote.coinOut.coinType),
+      this.priceProvider.getPrice(tokenInType),
+      this.priceProvider.getPrice(tokenOutType),
     ]);
 
     const amountInUSD = new BigNumber(
-      convertAmountToDecimalAmount(quote.amountIn, tokenIn.decimals)
+      convertAmountToDecimalAmount(amountIn, tokenIn.decimals)
     ).multipliedBy(tokenInPriceUSD);
     const amountOutUSD = new BigNumber(
-      convertAmountToDecimalAmount(quote.amountOut, tokenOut.decimals)
+      convertAmountToDecimalAmount(amountOut, tokenOut.decimals)
     ).multipliedBy(tokenOutPriceUSD);
 
     const priceImpact = new Percent(
@@ -120,6 +115,8 @@ export class PositionManager {
     return amountUSD.gte(this.rewardThresholdUsd.toString());
   }
 
+  // Simplified version: collects reward tokens without swapping
+  // TODO: Implement swap routing using Cetus SDK for full reward compounding
   swapPositionRewardToPoolToken =
     (
       position: Position,
@@ -128,38 +125,17 @@ export class PositionManager {
       amount: BN
     ) =>
     async (tx: Transaction) => {
-      const quote = await this.quoter.getRoutes({
-        tokenIn: rewardCoin.coin.coinType,
-        tokenOut: targetCoin.coin.coinType,
-        amountIn: amount.toString(),
-        excludePools: [position.pool.id],
-      });
-      await this.checkPriceImpact(quote);
-
-      const tradeBuilder = new TradeBuilder("mainnet", quote.routes).slippage(
-        this.slippageTolerance.numerator.toNumber()
-      );
-      if (!!this.trackingVolumeAddress) {
-        tradeBuilder.commission(
-          new Commission(
-            this.trackingVolumeAddress,
-            rewardCoin.coin,
-            CommissionType.PERCENTAGE,
-            ZERO_COMMISSION
-          )
-        );
-      }
-      const trade = tradeBuilder.build();
-      const swapped = (await trade.swap({
-        tx,
-        coinIn: rewardCoin.object,
-        client: jsonRpcProvider,
-      })) as TransactionResult;
-      tx.mergeCoins(targetCoin.object, [swapped]);
-
-      return new BN(quote.amountOut);
+      // For now, we just collect the reward without swapping
+      // The reward coins will remain in the wallet
+      console.log(`Collected ${amount.toString()} of reward coin ${rewardCoin.coin.coinType}`);
+      console.log(`TODO: Implement swap to ${targetCoin.coin.coinType} using Cetus Router`);
+      
+      // Return zero since we're not swapping
+      return new BN(0);
     };
 
+  // Simplified zap: calculates zap amount but doesn't swap
+  // TODO: Implement actual swap using Cetus SDK Router
   zap =
     (
       position: Position,
@@ -178,41 +154,13 @@ export class PositionManager {
       });
       invariant(zapAmount.gt(ZERO), "invalid zap amount");
 
-      const quote = await this.quoter.getRoutes({
-        tokenIn: sourceCoin.coin.coinType,
-        tokenOut: targetCoin.coin.coinType,
-        amountIn: zapAmount.toString(),
-        excludePools: [position.pool.id],
-      });
-      await this.checkPriceImpact(quote);
+      console.log(`Zap calculated: ${zapAmount.toString()} from ${sourceCoin.coin.coinType} to ${targetCoin.coin.coinType}`);
+      console.log(`TODO: Implement swap using Cetus Router`);
 
-      const tradeBuilder = new TradeBuilder("mainnet", quote.routes).slippage(
-        this.slippageTolerance.numerator.toNumber()
-      );
-      if (!!this.trackingVolumeAddress) {
-        tradeBuilder.commission(
-          new Commission(
-            this.trackingVolumeAddress,
-            targetCoin.coin,
-            CommissionType.PERCENTAGE,
-            ZERO_COMMISSION
-          )
-        );
-      }
-      const trade = tradeBuilder.build();
-      const [zapCoin] = tx.splitCoins(sourceCoin.object, [
-        zapAmount.toString(),
-      ]);
-      const swapped = (await trade.swap({
-        tx,
-        coinIn: zapCoin,
-        client: jsonRpcProvider,
-      })) as TransactionResult;
-      tx.mergeCoins(targetCoin.object, [swapped]);
-
+      // For now, return zap amount but no actual swap occurred
       return {
         zapAmount,
-        amountOut: new BN(quote.amountOut),
+        amountOut: new BN(0),
       };
     };
 

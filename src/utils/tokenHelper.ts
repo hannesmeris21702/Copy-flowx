@@ -6,7 +6,7 @@ import {
 } from "@mysten/sui/transactions";
 import { Coin as Token } from "./sdkTypes";
 
-import { BigintIsh, FLOWX_AG_UNIVERSAL_ROUTER_PACKAGE_ID } from "../constants";
+import { BigintIsh } from "../constants";
 import { cache } from "./cache";
 import { jsonRpcProvider } from "./jsonRpcProvider";
 import { CACHE_CONFIG } from "../config/cache";
@@ -41,6 +41,7 @@ export const convertAmountToDecimalAmount = (
     .toString();
 };
 
+// TODO: Implement refund functionality using Cetus SDK or native Sui transfer
 export const refundTokensIfNecessary =
   (
     token: {
@@ -50,11 +51,7 @@ export const refundTokensIfNecessary =
     receiver: string
   ) =>
   (tx: Transaction) => {
-    token.forEach((coin) => {
-      tx.moveCall({
-        target: `${FLOWX_AG_UNIVERSAL_ROUTER_PACKAGE_ID}::utils::refund_if_necessary`,
-        typeArguments: [coin.coinType],
-        arguments: [coin.objectCoin, tx.pure.address(receiver)],
-      });
-    });
+    // Simplified: no refund logic implemented yet
+    // Original used FlowX universal router for refunds
+    console.log(`TODO: Implement token refund for ${token.length} tokens to ${receiver}`);
   };

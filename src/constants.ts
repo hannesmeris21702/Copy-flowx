@@ -39,6 +39,3 @@ export const MAPPING_POOL_OBJECT_TYPE: Record<
   [Protocol.CETUS]:
     "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool",
 };
-
-// FlowX Aggregator Router - used for swap routing (not CLMM positions)
-export const FLOWX_AG_UNIVERSAL_ROUTER_PACKAGE_ID = "0xc263060d3cbb4155057f0010f92f63ca56d5121c298d01f7a33607342ec299b0";
