@@ -2,18 +2,18 @@ import { ClmmProtocol } from "../constants";
 import { Protocol } from "../utils/sdkTypes";
 
 import {
-  FlowXV3PositionProvider,
   IPositionProvider,
   PositionManager,
-  FlowXV3PositionManager,
 } from "./position";
 
 export const createPositionProvider = (
   protocol: ClmmProtocol
 ): IPositionProvider => {
   switch (protocol) {
-    case Protocol.FLOWX_V3:
-      return new FlowXV3PositionProvider();
+    case Protocol.CETUS:
+      throw new Error("Cetus position provider not yet implemented");
+    default:
+      throw new Error(`Unsupported protocol: ${protocol}`);
   }
 };
 
@@ -21,8 +21,10 @@ export const createPositionManager = (
   protocol: ClmmProtocol
 ): PositionManager => {
   switch (protocol) {
-    case Protocol.FLOWX_V3:
-      return new FlowXV3PositionManager();
+    case Protocol.CETUS:
+      throw new Error("Cetus position manager not yet implemented");
+    default:
+      throw new Error(`Unsupported protocol: ${protocol}`);
   }
 };
 
