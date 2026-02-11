@@ -4,7 +4,7 @@ import {
   TransactionArgument,
   TransactionResult,
 } from "@mysten/sui/transactions";
-import { Coin as Token } from "@flowx-finance/sdk";
+import { Coin as Token } from "./sdkTypes";
 
 import { BigintIsh, FLOWX_AG_UNIVERSAL_ROUTER_PACKAGE_ID } from "../constants";
 import { cache } from "./cache";

@@ -1,5 +1,5 @@
 import { PriceRange } from './PriceRange';
-import { Percent } from '@flowx-finance/sdk';
+import { Percent } from './sdkTypes';
 import BN from 'bn.js';
 
 describe('PriceRange', () => {

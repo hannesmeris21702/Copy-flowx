@@ -1,8 +1,5 @@
-import {
-  ClmmPool,
-  ClmmPosition,
-  ClmmTickMath,
-} from "@flowx-finance/sdk";
+// TODO: ClmmPool, ClmmPosition, ClmmTickMath need to be implemented
+// import { ClmmPool, ClmmPosition, ClmmTickMath } from "@flowx-finance/sdk";
 import BN from "bn.js";
 
 export const closestActiveRange = (pool: ClmmPool, multiplier = 1) => {

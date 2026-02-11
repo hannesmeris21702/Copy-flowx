@@ -1,6 +1,6 @@
 import BN from "bn.js";
 import BigNumber from "bignumber.js";
-import { BigintIsh, BPS, Fraction, ONE, Percent } from "@flowx-finance/sdk";
+import { BigintIsh, BPS, Fraction, ONE, Percent } from "./sdkTypes";
 
 import { Pool, PriceProvider } from "../entities";
 

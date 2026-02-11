@@ -1,5 +1,5 @@
-import { Protocol } from "@flowx-finance/sdk";
 import { ClmmProtocol } from "../constants";
+import { Protocol } from "../utils/sdkTypes";
 
 import {
   FlowXV3PositionProvider,

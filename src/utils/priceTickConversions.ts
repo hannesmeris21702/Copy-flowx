@@ -1,4 +1,6 @@
-import { ClmmTickMath, Coin, Price, Q128 } from "@flowx-finance/sdk";
+// TODO: ClmmTickMath needs to be implemented
+// import { ClmmTickMath } from "@flowx-finance/sdk";
+import { Coin, Price, Q128 } from "./sdkTypes";
 import { BigintIsh } from "../constants";
 import { BN } from "bn.js";
 

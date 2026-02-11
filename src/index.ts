@@ -1,4 +1,4 @@
-import { BPS, Percent } from "@flowx-finance/sdk";
+import { BPS, Percent } from "./utils/sdkTypes";
 import { Worker } from "./Worker";
 import { removeTrailingZeros } from "./utils/stringUtils";
 import { ClmmProtocol } from "./constants";

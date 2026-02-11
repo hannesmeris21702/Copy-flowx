@@ -1,6 +1,6 @@
 import { BN } from "bn.js";
 import { Transaction } from "@mysten/sui/transactions";
-import { BPS, Percent } from "@flowx-finance/sdk";
+import { BPS, Percent } from "./utils/sdkTypes";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 import { PositionManager } from "./PositionManager";
