@@ -4,7 +4,7 @@ Automated rebalancing bot for Concentrated Liquidity Market Maker (CLMM) positio
 
 ## Features
 
-- **Multi-Protocol Support**: Works with FlowX V3, Cetus, Turbos Finance, Bluefin, and Magma Finance
+- **Protocol Support**: Works with FlowX V3, 
 - **Automated Rebalancing**: Continuously monitors positions and rebalances when price moves outside target ranges
 - **Reward Compounding**: Automatically compounds rewards based on configurable thresholds and schedules
 - **Price Impact Protection**: Configurable price impact thresholds to prevent unfavorable trades
@@ -89,7 +89,7 @@ Create a `.env` file in the root directory with the following variables:
 ### Required Configuration
 
 ```env
-# Protocol to use (FLOWX_V3, CETUS, TURBOS_FIANCE, BLUEFIN, MAGMA_FINANCE)
+# Protocol to use FLOWX_V3
 PROTOCOL=FLOWX_V3
 
 # Target pool ID for rebalancing
@@ -188,10 +188,8 @@ The bot can automatically compound rewards based on:
 ## Supported Protocols
 
 - **FlowX V3**: Next-generation AMM with concentrated liquidity
-- **Cetus**: Leading DEX on Sui with advanced trading features
-- **Turbos Finance**: High-performance DeFi protocol
-- **Bluefin**: Derivatives and spot trading platform
-- **Magma Finance**: Innovative liquidity solutions
+
+
 
 ## Monitoring and Logging
 
