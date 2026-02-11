@@ -1,5 +1,5 @@
 {
-  "name": "copy-flowx",
+  "name": "cetus-clmm-rebalance-bot",
   "version": "1.0.0",
   "description": "CLMM Rebalance Bot for Cetus Protocol",
   "main": "dist/index.js",

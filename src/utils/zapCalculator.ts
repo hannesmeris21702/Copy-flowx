@@ -48,9 +48,11 @@ export class ZapCalculator {
       ratio = new Fraction(ONE).divide(ratio);
     }
 
+    const feePercent = new Percent(pool.fee.toString(), BPS);
+    const oneMinusFee = new Percent(1).subtract(feePercent);
     const fraction = ratio
-      .multiply(new Percent(1).subtract(new Percent(pool.fee.toString(), BPS)))
-      .add(ONE.toString());
+      .multiply(oneMinusFee.asFraction)
+      .add(new Fraction(ONE));
     return new BN(amount).sub(
       new BN(new Fraction(amount).divide(fraction).toFixed(0))
     );

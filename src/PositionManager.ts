@@ -20,6 +20,9 @@ import { ZapCalculator } from "./utils/zapCalculator";
 import { PriceProvider } from "./entities";
 import { convertAmountToDecimalAmount, getToken } from "./utils/tokenHelper";
 import { refundTokensIfNecessary } from "./utils/tokenHelper";
+import { getLogger } from "./utils/Logger";
+
+const logger = getLogger();
 
 interface RebalancerConstructorArgs {
   slippageTolerance: Percent;
@@ -127,8 +130,8 @@ export class PositionManager {
     async (tx: Transaction) => {
       // For now, we just collect the reward without swapping
       // The reward coins will remain in the wallet
-      console.log(`Collected ${amount.toString()} of reward coin ${rewardCoin.coin.coinType}`);
-      console.log(`TODO: Implement swap to ${targetCoin.coin.coinType} using Cetus Router`);
+      logger.warn(`Collected ${amount.toString()} of reward coin ${rewardCoin.coin.coinType}`);
+      logger.warn(`TODO: Implement swap to ${targetCoin.coin.coinType} using Cetus Router`);
       
       // Return zero since we're not swapping
       return new BN(0);
@@ -154,8 +157,8 @@ export class PositionManager {
       });
       invariant(zapAmount.gt(ZERO), "invalid zap amount");
 
-      console.log(`Zap calculated: ${zapAmount.toString()} from ${sourceCoin.coin.coinType} to ${targetCoin.coin.coinType}`);
-      console.log(`TODO: Implement swap using Cetus Router`);
+      logger.warn(`Zap calculated: ${zapAmount.toString()} from ${sourceCoin.coin.coinType} to ${targetCoin.coin.coinType}`);
+      logger.warn(`TODO: Implement swap using Cetus Router`);
 
       // For now, return zap amount but no actual swap occurred
       return {
