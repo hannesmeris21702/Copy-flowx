@@ -4,6 +4,8 @@ import { Protocol } from "../utils/sdkTypes";
 import {
   IPositionProvider,
   PositionManager,
+  CetusPositionProvider,
+  CetusPositionManager,
 } from "./position";
 
 export const createPositionProvider = (
@@ -11,7 +13,7 @@ export const createPositionProvider = (
 ): IPositionProvider => {
   switch (protocol) {
     case Protocol.CETUS:
-      throw new Error("Cetus position provider not yet implemented");
+      return new CetusPositionProvider();
     default:
       throw new Error(`Unsupported protocol: ${protocol}`);
   }
@@ -22,7 +24,7 @@ export const createPositionManager = (
 ): PositionManager => {
   switch (protocol) {
     case Protocol.CETUS:
-      throw new Error("Cetus position manager not yet implemented");
+      return new CetusPositionManager();
     default:
       throw new Error(`Unsupported protocol: ${protocol}`);
   }
