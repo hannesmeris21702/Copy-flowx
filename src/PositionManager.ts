@@ -379,50 +379,6 @@ export class PositionManager {
                   reward.amount
                 );
               if (!rewardExceededThreshold) {
-                return new BN(0);
-              }
-
-              return this.swapPositionRewardToPoolToken(
-                position,
-                { coin: coinX, object: removedX as any },
-                {
-                  coin: reward.coin,
-                  object: tx.splitCoins(reward.object, [
-                    reward.amount.toString(),
-                  ]),
-                },
-                reward.amount
-              )(tx);
-            })
-          )
-        ).reduce(
-          (acc, convertedAmount) => acc.add(new BN(convertedAmount)),
-          new BN(0)
-        );
-
-        const { zapAmount, amountOut } = await this.zap(
-          positionThatWillBeCreated,
-          { coin: coinX, object: removedX as any },
-          { coin: coinY, object: removedY as any },
-          remainingX.add(totalConvertedAmount)
-        )(tx);
-
-        expectedMintAmounts.amountX = expectedMintAmounts.amountX
-          .add(totalConvertedAmount)
-          .sub(zapAmount);
-        expectedMintAmounts.amountY = expectedMintAmounts.amountY.add(
-          new BN(amountOut)
-        );
-      } else if (remainingY.gt(this.minZapAmounts.amountY)) {
-        const totalConvertedAmount = (
-          await Promise.all(
-            nonPoolTokenRewards.map(async (reward) => {
-              const rewardExceededThreshold =
-                await this.doesRewardExceedValueThreshold(
-                  reward.coin.coinType,
-                  reward.amount
-                );
-              if (!rewardExceededThreshold) {
                 logger.info(
                   `MIGRATE Step 6: Reward ${reward.coin.symbol} ` +
                   `below threshold, skipping swap`
