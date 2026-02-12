@@ -276,6 +276,10 @@ export class Worker {
       newUpperTick = activeTicks[1];
     }
 
+    // Ensure ticks are properly aligned to tickSpacing (defensive programming)
+    newLowerTick = Math.round(newLowerTick / pool.tickSpacing) * pool.tickSpacing;
+    newUpperTick = Math.round(newUpperTick / pool.tickSpacing) * pool.tickSpacing;
+
     // =================================================================
     // SAFETY RULE: Validate new tick range
     // Ensure new range is valid and contains current tick

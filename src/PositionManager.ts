@@ -88,12 +88,14 @@ export class PositionManager {
       convertAmountToDecimalAmount(amountOut, tokenOut.decimals)
     ).multipliedBy(tokenOutPriceUSD);
 
+    // Price impact = (amountOut - amountIn) / amountIn
+    // Negative values indicate a loss (e.g., -5% means you got 5% less value out than you put in)
     const priceImpact = new Percent(
       amountOutUSD
         .multipliedBy(BPS.toString())
         .minus(amountInUSD.multipliedBy(BPS.toString()))
         .toFixed(0),
-      amountOutUSD.multipliedBy(BPS.toString()).toFixed(0)
+      amountInUSD.multipliedBy(BPS.toString()).toFixed(0)
     );
 
     invariant(
