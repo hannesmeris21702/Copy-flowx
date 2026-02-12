@@ -191,8 +191,7 @@ export class Worker {
     }
 
     // Skip if liquidity is zero
-    const liquidityBN = new BN(this.position.liquidity);
-    if (liquidityBN.eq(ZERO)) {
+    if (new BN(this.position.liquidity).eq(ZERO)) {
       this.logger.info("Rebalance: Position has zero liquidity, skipping");
       return;
     }
@@ -286,7 +285,7 @@ export class Worker {
       return;
     }
 
-    if (newLowerTick >= currentTick || newUpperTick <= currentTick) {
+    if (newLowerTick > currentTick || newUpperTick < currentTick) {
       this.logger.error(
         `Rebalance: New tick range does not contain current tick: ` +
         `newLowerTick=${newLowerTick}, currentTick=${currentTick}, newUpperTick=${newUpperTick}`
