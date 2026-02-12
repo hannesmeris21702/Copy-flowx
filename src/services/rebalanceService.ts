@@ -1,4 +1,4 @@
-import { Transaction, TransactionObjectArgument } from '@mysten/sui/transactions';
+import { Transaction, TransactionObjectArgument, coinWithBalance } from '@mysten/sui/transactions';
 import { SUI_CLOCK_OBJECT_ID } from '@mysten/sui/utils';
 import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
@@ -131,14 +131,21 @@ export class RebalanceService {
     
     // Step 2: Collect fees from old position
     // Returns: [Coin<A>, Coin<B>]
+    // Note: pool_script_v2::collect_fee requires coin inputs (can be zero-value coins)
     logger.info('Step 2: Collect fees → returns [feeCoinA, feeCoinB]');
+    
+    // Create zero-value coins for collect_fee (required by pool_script_v2)
+    const zeroCoinA = coinWithBalance({ type: pool.coinTypeA, balance: 0 })(ptb);
+    const zeroCoinB = coinWithBalance({ type: pool.coinTypeB, balance: 0 })(ptb);
+    
     const [feeCoinA, feeCoinB] = ptb.moveCall({
-      target: `${packageId}::pool_script::collect_fee`,
+      target: `${packageId}::pool_script_v2::collect_fee`,
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         ptb.object(position.id),
-        ptb.pure.bool(true),
+        zeroCoinA,
+        zeroCoinB,
       ],
       typeArguments: [pool.coinTypeA, pool.coinTypeB],
     });
@@ -211,12 +218,13 @@ export class RebalanceService {
     // These are the exact coins from remove+collect+swap operations
     logger.info('Step 7: Add liquidity → consumes finalCoinA, finalCoinB');
     
-    // Use the same min amounts for consistency
+    // Calculate amounts to add - use the coins we have
+    // fix_amount_a = true means we'll use all of coinA and calculate needed coinB
     const minAddAmountA = minAmountA;
     const minAddAmountB = minAmountB;
     
     ptb.moveCall({
-      target: `${packageId}::pool_script::add_liquidity`,
+      target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -225,6 +233,7 @@ export class RebalanceService {
         finalCoinB,  // PROOF: This is the exact coin from swap output or original removedCoinB
         ptb.pure.u64(minAddAmountA.toString()),
         ptb.pure.u64(minAddAmountB.toString()),
+        ptb.pure.bool(true), // fix_amount_a: use amount A as the fixed amount
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
       typeArguments: [pool.coinTypeA, pool.coinTypeB],
@@ -262,22 +271,32 @@ export class RebalanceService {
     const sqrtPriceLower = tickToSqrtPrice(newRange.tickLower);
     const sqrtPriceUpper = tickToSqrtPrice(newRange.tickUpper);
     
-    // CRITICAL FIX: Track which coins are valid after swap
-    // When swap_b2a is called with coinB, it CONSUMES coinB and RETURNS new coinA
-    // When swap_a2b is called with coinA, it CONSUMES coinA and RETURNS new coinB
+    // Sqrt price limits for swaps
+    const MIN_SQRT_PRICE = '4295048016';
+    const MAX_SQRT_PRICE = '79226673515401279992447579055';
+    
+    // CRITICAL FIX: pool_script_v2 swap functions require BOTH coins as input
+    // The coin we're not swapping should be zero-value
     
     if (sqrtPriceCurrent < sqrtPriceLower) {
       // Price below range - need token A
-      // Swap ALL of coinB to get more coinA
+      // Swap ALL of coinB to get more coinA (swap B→A, which is swap_b2a or a2b=false)
       logger.info('  Price below new range - swapping ALL coinB to coinA');
       
+      // For swap_b2a (a2b=false), we need coinA with 0 value and coinB with the amount
+      const zeroCoinA = coinWithBalance({ type: pool.coinTypeA, balance: 0 })(ptb);
+      
       const swappedCoinA = ptb.moveCall({
-        target: `${packageId}::pool_script::swap_b2a`,
+        target: `${packageId}::pool_script_v2::swap_b2a`,
         arguments: [
           ptb.object(globalConfigId),
           ptb.object(pool.id),
-          coinB,  // CONSUMED by this call
-          ptb.pure.u64('0'), // min_amount_out
+          zeroCoinA,  // coin_a (not consumed, zero value)
+          coinB,      // coin_b (consumed)
+          ptb.pure.bool(true), // by_amount_in: swap exact amount of B
+          ptb.pure.u64('18446744073709551615'), // amount: u64::MAX to swap all
+          ptb.pure.u64('0'), // amount_limit: minimum output amount
+          ptb.pure.u128(MAX_SQRT_PRICE), // sqrt_price_limit
           ptb.object(SUI_CLOCK_OBJECT_ID),
         ],
         typeArguments: [pool.coinTypeA, pool.coinTypeB],
@@ -289,33 +308,30 @@ export class RebalanceService {
       
       // CRITICAL: coinB is now consumed (invalid)
       // Create a new zero-value coin for coinB since add_liquidity requires both coins
-      const zeroCoinB = ptb.moveCall({
-        target: `${packageId}::pool_script::swap_a2b`,
-        arguments: [
-          ptb.object(globalConfigId),
-          ptb.object(pool.id),
-          ptb.splitCoins(coinA, [ptb.pure.u64('0')]),  // Split 0 from coinA to get a valid coin object
-          ptb.pure.u64('0'),
-          ptb.object(SUI_CLOCK_OBJECT_ID),
-        ],
-        typeArguments: [pool.coinTypeA, pool.coinTypeB],
-      });
+      const zeroCoinB = coinWithBalance({ type: pool.coinTypeB, balance: 0 })(ptb);
       
       logger.info('  ✓ Created zero-value coinB for add_liquidity');
       return { coinA, coinB: zeroCoinB };
       
     } else if (sqrtPriceCurrent > sqrtPriceUpper) {
       // Price above range - need token B
-      // Swap ALL of coinA to get more coinB
+      // Swap ALL of coinA to get more coinB (swap A→B, which is swap_a2b or a2b=true)
       logger.info('  Price above new range - swapping ALL coinA to coinB');
       
+      // For swap_a2b (a2b=true), we need coinB with 0 value and coinA with the amount
+      const zeroCoinB = coinWithBalance({ type: pool.coinTypeB, balance: 0 })(ptb);
+      
       const swappedCoinB = ptb.moveCall({
-        target: `${packageId}::pool_script::swap_a2b`,
+        target: `${packageId}::pool_script_v2::swap_a2b`,
         arguments: [
           ptb.object(globalConfigId),
           ptb.object(pool.id),
-          coinA,  // CONSUMED by this call
-          ptb.pure.u64('0'), // min_amount_out
+          coinA,      // coin_a (consumed)
+          zeroCoinB,  // coin_b (not consumed, zero value)
+          ptb.pure.bool(true), // by_amount_in: swap exact amount of A
+          ptb.pure.u64('18446744073709551615'), // amount: u64::MAX to swap all
+          ptb.pure.u64('0'), // amount_limit: minimum output amount
+          ptb.pure.u128(MIN_SQRT_PRICE), // sqrt_price_limit
           ptb.object(SUI_CLOCK_OBJECT_ID),
         ],
         typeArguments: [pool.coinTypeA, pool.coinTypeB],
@@ -327,17 +343,7 @@ export class RebalanceService {
       
       // CRITICAL: coinA is now consumed (invalid)
       // Create a new zero-value coin for coinA since add_liquidity requires both coins
-      const zeroCoinA = ptb.moveCall({
-        target: `${packageId}::pool_script::swap_b2a`,
-        arguments: [
-          ptb.object(globalConfigId),
-          ptb.object(pool.id),
-          ptb.splitCoins(coinB, [ptb.pure.u64('0')]),  // Split 0 from coinB to get a valid coin object
-          ptb.pure.u64('0'),
-          ptb.object(SUI_CLOCK_OBJECT_ID),
-        ],
-        typeArguments: [pool.coinTypeA, pool.coinTypeB],
-      });
+      const zeroCoinA = coinWithBalance({ type: pool.coinTypeA, balance: 0 })(ptb);
       
       logger.info('  ✓ Created zero-value coinA for add_liquidity');
       return { coinA: zeroCoinA, coinB };
