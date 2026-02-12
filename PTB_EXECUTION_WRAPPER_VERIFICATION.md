@@ -302,19 +302,20 @@ const valid = validateTypeArguments(normalized);
 
 ### Worst Case Scenario (5 retries, all fail)
 ```
-Attempt 1: Execute (~1-3s) + fail
-Wait: 1000ms (1000 * 2^0)
-Attempt 2: Execute (~1-3s) + fail
-Wait: 2000ms (1000 * 2^1)
-Attempt 3: Execute (~1-3s) + fail
-Wait: 4000ms (1000 * 2^2)
-Attempt 4: Execute (~1-3s) + fail
-Wait: 8000ms (1000 * 2^3)
-Attempt 5: Execute (~1-3s) + fail
+Attempt 1: Execute (~1-3s) → FAIL
+  ↓ Wait: 1000ms (baseDelay * 2^0)
+Attempt 2: Execute (~1-3s) → FAIL
+  ↓ Wait: 2000ms (baseDelay * 2^1)
+Attempt 3: Execute (~1-3s) → FAIL
+  ↓ Wait: 4000ms (baseDelay * 2^2)
+Attempt 4: Execute (~1-3s) → FAIL
+  ↓ Wait: 8000ms (baseDelay * 2^3)
+Attempt 5: Execute (~1-3s) → FAIL (no more retries)
 
-Cumulative wait time: 15 seconds (1000 + 2000 + 4000 + 8000)
-Total execution time: 5-15 seconds (5 attempts × 1-3s each)
-Total worst case: ~20-30 seconds
+Breakdown:
+- Cumulative wait time: 15 seconds (1000 + 2000 + 4000 + 8000)
+- Total execution time: 5-15 seconds (5 attempts × 1-3s each)
+- Total worst case duration: ~20-30 seconds
 ```
 
 ### Best Case Scenario (Success on first attempt)
