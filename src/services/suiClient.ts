@@ -33,12 +33,16 @@ export class SuiClientService {
     return this.keypair.getPublicKey().toSuiAddress();
   }
   
-  async simulateTransaction(tx: Transaction): Promise<void> {
+  async executeTransaction(tx: Transaction): Promise<SuiTransactionBlockResponse> {
     try {
+      // Clone the transaction for simulation to avoid reuse issues
+      const txBytes = await tx.build({ client: this.client });
+      
+      // Simulate with the built transaction
       await withRetry(
         async () => {
           const result = await this.client.dryRunTransactionBlock({
-            transactionBlock: await tx.build({ client: this.client }),
+            transactionBlock: txBytes,
           });
           
           if (result.effects.status.status !== 'success') {
@@ -54,16 +58,8 @@ export class SuiClientService {
         this.config.maxRetryDelayMs,
         'Transaction simulation'
       );
-    } catch (error) {
-      logger.error('Transaction simulation failed', error);
-      throw error;
-    }
-  }
-  
-  async executeTransaction(tx: Transaction): Promise<SuiTransactionBlockResponse> {
-    try {
-      await this.simulateTransaction(tx);
       
+      // Execute the original transaction
       return await withRetry(
         async () => {
           const result = await this.client.signAndExecuteTransaction({

@@ -32,22 +32,22 @@ export function tickToSqrtPrice(tick: number): bigint {
 }
 
 export function sqrtPriceToTick(sqrtPrice: bigint): number {
-  let tick = 0;
-  let ratio = sqrtPrice;
+  // More accurate conversion using logarithm
+  // tick = floor(log(sqrtPrice / Q96) / log(sqrt(1.0001)))
+  // This is equivalent to: floor(log(sqrtPrice / Q96) / (0.5 * log(1.0001)))
   
-  if (ratio >= Q96) {
-    while (ratio >= Q96) {
-      ratio = ratio / BigInt(2);
-      tick++;
-    }
-  } else {
-    while (ratio < Q96 / BigInt(2)) {
-      ratio = ratio * BigInt(2);
-      tick--;
-    }
+  const sqrtPriceNum = Number(sqrtPrice);
+  const q96Num = Number(Q96);
+  
+  if (sqrtPriceNum <= 0 || q96Num <= 0) {
+    throw new Error('Invalid sqrt price');
   }
   
-  return tick;
+  const ratio = sqrtPriceNum / q96Num;
+  const logRatio = Math.log(ratio);
+  const logSqrtBase = Math.log(Math.sqrt(1.0001));
+  
+  return Math.floor(logRatio / logSqrtBase);
 }
 
 export function getAmountAFromLiquidity(
@@ -86,14 +86,19 @@ export function calculateTickRange(
   rangeWidthPercent: number,
   tickSpacing: number
 ): { tickLower: number; tickUpper: number } {
-  const widthInTicks = Math.floor((currentTick * rangeWidthPercent) / 100);
+  // Calculate tick range based on price percentage, not tick value
+  // For a given percentage p, the tick difference is: log(1 + p/100) / log(1.0001)
+  // This ensures the range represents the actual price percentage
+  
+  const priceRatio = 1 + rangeWidthPercent / 100;
+  const tickDelta = Math.floor(Math.log(priceRatio) / Math.log(1.0001));
   
   const tickLower = alignTickToSpacing(
-    currentTick - Math.floor(widthInTicks / 2),
+    currentTick - Math.floor(tickDelta / 2),
     tickSpacing
   );
   const tickUpper = alignTickToSpacing(
-    currentTick + Math.floor(widthInTicks / 2),
+    currentTick + Math.floor(tickDelta / 2),
     tickSpacing
   );
   
@@ -118,8 +123,14 @@ export function calculatePriceDeviation(
   }
   
   if (currentTick < tickLower) {
-    return ((tickLower - currentTick) / Math.abs(tickLower)) * 100;
+    // Calculate deviation as percentage of range width
+    const rangeWidth = tickUpper - tickLower;
+    if (rangeWidth === 0) return 100; // Degenerate case
+    return ((tickLower - currentTick) / rangeWidth) * 100;
   }
   
-  return ((currentTick - tickUpper) / Math.abs(tickUpper)) * 100;
+  // currentTick > tickUpper
+  const rangeWidth = tickUpper - tickLower;
+  if (rangeWidth === 0) return 100; // Degenerate case
+  return ((currentTick - tickUpper) / rangeWidth) * 100;
 }
