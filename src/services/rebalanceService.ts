@@ -105,6 +105,11 @@ export class RebalanceService {
     minAmountB: bigint
   ): Promise<Transaction> {
     const ptb = new Transaction();
+    
+    // Set sender to enable proper gas coin handling
+    // This prevents "Encountered unexpected token when parsing type args for gas" error
+    ptb.setSender(this.suiClient.getAddress());
+    
     const sdk = this.cetusService.getSDK();
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
