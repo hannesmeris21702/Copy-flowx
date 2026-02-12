@@ -137,8 +137,9 @@ export class RebalanceService {
     
     // Step 1: Remove liquidity from old position
     // Use SDK builder pattern: pool_script::remove_liquidity
+    // Note: Returns a tuple (Coin<A>, Coin<B>) which we must properly destructure
     logger.info('Step 1: Remove liquidity → returns [coinA, coinB]');
-    const [removedCoinA, removedCoinB] = ptb.moveCall({
+    const removeLiquidityResult = ptb.moveCall({
       target: `${packageId}::pool_script::remove_liquidity`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
@@ -151,16 +152,20 @@ export class RebalanceService {
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
+    // Explicitly access tuple elements
+    const removedCoinA = removeLiquidityResult[0];
+    const removedCoinB = removeLiquidityResult[1];
     logger.info('  ✓ Captured: removedCoinA, removedCoinB');
     
     // Step 2: Collect fees from old position
     // Use SDK builder pattern: pool_script_v2::collect_fee
+    // Note: Returns a tuple (Coin<A>, Coin<B>) which we must properly destructure
     logger.info('Step 2: Collect fees → returns [feeCoinA, feeCoinB]');
     
     const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0 })(ptb);
     const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0 })(ptb);
     
-    const [feeCoinA, feeCoinB] = ptb.moveCall({
+    const collectFeeResult = ptb.moveCall({
       target: `${packageId}::pool_script_v2::collect_fee`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
@@ -171,6 +176,9 @@ export class RebalanceService {
         zeroCoinB,
       ],
     });
+    // Explicitly access tuple elements
+    const feeCoinA = collectFeeResult[0];
+    const feeCoinB = collectFeeResult[1];
     logger.info('  ✓ Captured: feeCoinA, feeCoinB');
     
     // Step 3: Merge removed liquidity with collected fees
@@ -181,6 +189,7 @@ export class RebalanceService {
     
     // Step 4: Close old position
     // Use SDK builder pattern: pool_script::close_position
+    // Note: close_position only takes config, pool, and position - no amounts or clock
     logger.info('Step 4: Close old position (NFT cleanup)');
     ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
@@ -189,9 +198,6 @@ export class RebalanceService {
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         ptb.object(position.id),
-        ptb.pure.u64(minAmountA.toString()),
-        ptb.pure.u64(minAmountB.toString()),
-        ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
     logger.info('  ✓ Position closed');
@@ -260,6 +266,15 @@ export class RebalanceService {
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
     logger.info('NO COIN OBJECTS DROPPED OR UNTRANSFERRED');
     
+    // Add PTB validation: Print commands before build (as requested in problem statement)
+    const ptbData = ptb.getData();
+    logger.info('=== PTB COMMANDS VALIDATION ===');
+    logger.info(`Total commands: ${ptbData.commands.length}`);
+    ptbData.commands.forEach((cmd, idx) => {
+      logger.info(`Command ${idx}: ${JSON.stringify(cmd)}`);
+    });
+    logger.info('=== END PTB COMMANDS ===');
+    
     return ptb;
   }
   
@@ -293,7 +308,8 @@ export class RebalanceService {
       const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0 })(ptb);
       
       // Use SDK builder pattern: router::swap
-      const [swappedCoinA, remainderCoinB] = ptb.moveCall({
+      // Note: Returns tuple (Coin<A>, Coin<B>) which we must properly destructure
+      const swapResult = ptb.moveCall({
         target: `${packageId}::router::swap`,
         typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
         arguments: [
@@ -309,6 +325,9 @@ export class RebalanceService {
           ptb.object(SUI_CLOCK_OBJECT_ID),
         ],
       });
+      // Explicitly access tuple elements
+      const swappedCoinA = swapResult[0];
+      const remainderCoinB = swapResult[1];
       
       ptb.mergeCoins(coinA, [swappedCoinA]);
       logger.info('  ✓ Swapped: coinB consumed, output merged into coinA');
@@ -322,7 +341,8 @@ export class RebalanceService {
       const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0 })(ptb);
       
       // Use SDK builder pattern: router::swap
-      const [remainderCoinA, swappedCoinB] = ptb.moveCall({
+      // Note: Returns tuple (Coin<A>, Coin<B>) which we must properly destructure
+      const swapResult = ptb.moveCall({
         target: `${packageId}::router::swap`,
         typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
         arguments: [
@@ -338,6 +358,9 @@ export class RebalanceService {
           ptb.object(SUI_CLOCK_OBJECT_ID),
         ],
       });
+      // Explicitly access tuple elements
+      const remainderCoinA = swapResult[0];
+      const swappedCoinB = swapResult[1];
       
       ptb.mergeCoins(coinB, [swappedCoinB]);
       logger.info('  ✓ Swapped: coinA consumed, output merged into coinB');
