@@ -4,6 +4,7 @@ import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
 import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
+import { normalizeTypeArguments } from '../utils/typeArgNormalizer';
 import {
   calculateTickRange,
   tickToSqrtPrice,
@@ -113,12 +114,19 @@ export class RebalanceService {
     const packageId = sdk.sdkOptions.integrate.published_at;
     const globalConfigId = sdk.sdkOptions.clmm_pool.config!.global_config_id;
     
+    // Normalize type arguments to prevent parsing errors
+    const [normalizedCoinTypeA, normalizedCoinTypeB] = normalizeTypeArguments([
+      pool.coinTypeA,
+      pool.coinTypeB
+    ]);
+    logger.debug(`Type args normalized: A=${normalizedCoinTypeA}, B=${normalizedCoinTypeB}`);
+    
     // Step 1: Remove liquidity from old position
     // Use SDK builder pattern: pool_script::remove_liquidity
     logger.info('Step 1: Remove liquidity → returns [coinA, coinB]');
     const [removedCoinA, removedCoinB] = ptb.moveCall({
       target: `${packageId}::pool_script::remove_liquidity`,
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
+      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -135,12 +143,12 @@ export class RebalanceService {
     // Use SDK builder pattern: pool_script_v2::collect_fee
     logger.info('Step 2: Collect fees → returns [feeCoinA, feeCoinB]');
     
-    const zeroCoinA = coinWithBalance({ type: pool.coinTypeA, balance: 0 })(ptb);
-    const zeroCoinB = coinWithBalance({ type: pool.coinTypeB, balance: 0 })(ptb);
+    const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0 })(ptb);
+    const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0 })(ptb);
     
     const [feeCoinA, feeCoinB] = ptb.moveCall({
       target: `${packageId}::pool_script_v2::collect_fee`,
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
+      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -162,7 +170,7 @@ export class RebalanceService {
     logger.info('Step 4: Close old position (NFT cleanup)');
     ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
+      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -183,7 +191,9 @@ export class RebalanceService {
       removedCoinA,
       removedCoinB,
       packageId,
-      globalConfigId
+      globalConfigId,
+      normalizedCoinTypeA,
+      normalizedCoinTypeB
     );
     logger.info('  ✓ Final coins ready: finalCoinA, finalCoinB');
     
@@ -197,7 +207,7 @@ export class RebalanceService {
     
     const newPosition = ptb.moveCall({
       target: `${packageId}::pool_script::open_position`,
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
+      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -213,7 +223,7 @@ export class RebalanceService {
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
+      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -246,7 +256,9 @@ export class RebalanceService {
     coinA: TransactionObjectArgument,
     coinB: TransactionObjectArgument,
     packageId: string,
-    globalConfigId: string
+    globalConfigId: string,
+    normalizedCoinTypeA: string,
+    normalizedCoinTypeB: string
   ): { coinA: TransactionObjectArgument; coinB: TransactionObjectArgument } {
     // Calculate optimal ratio for new range
     const sqrtPriceCurrent = BigInt(pool.currentSqrtPrice);
@@ -264,12 +276,12 @@ export class RebalanceService {
       // Price below range - need token A, swap B to A
       logger.info('  Price below new range - swapping ALL coinB to coinA');
       
-      const zeroCoinA = coinWithBalance({ type: pool.coinTypeA, balance: 0 })(ptb);
+      const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0 })(ptb);
       
       // Use SDK builder pattern: router::swap
       const [swappedCoinA, remainderCoinB] = ptb.moveCall({
         target: `${packageId}::router::swap`,
-        typeArguments: [pool.coinTypeA, pool.coinTypeB],
+        typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
         arguments: [
           ptb.object(globalConfigId),
           ptb.object(pool.id),
@@ -293,12 +305,12 @@ export class RebalanceService {
       // Price above range - need token B, swap A to B
       logger.info('  Price above new range - swapping ALL coinA to coinB');
       
-      const zeroCoinB = coinWithBalance({ type: pool.coinTypeB, balance: 0 })(ptb);
+      const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0 })(ptb);
       
       // Use SDK builder pattern: router::swap
       const [remainderCoinA, swappedCoinB] = ptb.moveCall({
         target: `${packageId}::router::swap`,
-        typeArguments: [pool.coinTypeA, pool.coinTypeB],
+        typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
         arguments: [
           ptb.object(globalConfigId),
           ptb.object(pool.id),
