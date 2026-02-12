@@ -152,10 +152,6 @@ const rpcUrl =
   process.env.RPC_URL ||
   "https://fullnode.mainnet.sui.io:443";
 
-if (!rpcUrl) {
-  throw new Error("RPC_URL is not defined in environment variables");
-}
-
 console.log("Using RPC URL:", rpcUrl);
 
 export const jsonRpcProvider = new SuiClient({
