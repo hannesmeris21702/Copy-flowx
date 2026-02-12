@@ -136,8 +136,8 @@ export class RebalanceService {
     logger.debug('Type argument validation passed');
     
     // Create zero coins upfront (before any moveCall operations)
-    // This ensures proper command indexing
-    logger.info('Creating zero-balance coins for fee collection...');
+    // This ensures proper command indexing for all subsequent operations
+    logger.info('Creating zero-balance coins for transaction operations...');
     const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0 })(ptb);
     const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0 })(ptb);
     logger.info('  ✓ Zero coins created');
@@ -266,13 +266,14 @@ export class RebalanceService {
     logger.info('NO COIN OBJECTS DROPPED OR UNTRANSFERRED');
     
     // Add PTB validation: Print commands before build (as requested in problem statement)
+    // Use debug level to avoid performance overhead in production
     const ptbData = ptb.getData();
-    logger.info('=== PTB COMMANDS VALIDATION ===');
-    logger.info(`Total commands: ${ptbData.commands.length}`);
+    logger.debug('=== PTB COMMANDS VALIDATION ===');
+    logger.debug(`Total commands: ${ptbData.commands.length}`);
     ptbData.commands.forEach((cmd, idx) => {
-      logger.info(`Command ${idx}: ${JSON.stringify(cmd)}`);
+      logger.debug(`Command ${idx}: ${JSON.stringify(cmd)}`);
     });
-    logger.info('=== END PTB COMMANDS ===');
+    logger.debug('=== END PTB COMMANDS ===');
     
     return ptb;
   }
