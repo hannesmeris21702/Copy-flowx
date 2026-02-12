@@ -3,7 +3,7 @@ dotenv.config();
 
 import { loadConfig, validateConfig } from './config';
 import { logger } from './utils/logger';
-import { RebalancingBot } from './services/bot';
+import { MonitoringBot } from './services/bot';
 import fs from 'fs';
 import path from 'path';
 
@@ -14,7 +14,8 @@ if (!fs.existsSync(logsDir)) {
 
 async function main(): Promise<void> {
   try {
-    logger.info('=== Cetus CLMM Rebalancing Bot ===');
+    logger.info('=== Cetus CLMM Position Monitor ===');
+    logger.info('NOTE: Monitoring only - no automated trading');
     
     logger.info('Loading configuration...');
     const config = loadConfig();
@@ -24,7 +25,7 @@ async function main(): Promise<void> {
     
     logger.info('Configuration loaded successfully');
     
-    const bot = new RebalancingBot(config);
+    const bot = new MonitoringBot(config);
     
     await bot.start();
     
@@ -40,14 +41,14 @@ async function main(): Promise<void> {
       process.exit(0);
     });
     
-    process.on('uncaughtException', (error) => {
+    process.on('uncaughtException', (error: Error) => {
       logger.error('Uncaught exception', error);
       bot.stop();
       process.exit(1);
     });
     
-    process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Unhandled rejection', { reason, promise });
+    process.on('unhandledRejection', (reason: unknown) => {
+      logger.error('Unhandled rejection', { reason });
     });
   } catch (error) {
     logger.error('Fatal error starting bot', error);

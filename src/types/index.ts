@@ -32,24 +32,3 @@ export interface Pool {
   tickSpacing: number;
   feeRate: number;
 }
-
-export interface RebalanceDecision {
-  shouldRebalance: boolean;
-  reason: string;
-  currentTick: number;
-  tickLower: number;
-  tickUpper: number;
-  priceDeviation: number;
-}
-
-export interface SwapParams {
-  coinTypeIn: string;
-  coinTypeOut: string;
-  amountIn: string;
-  minAmountOut: string;
-}
-
-export interface TickRange {
-  tickLower: number;
-  tickUpper: number;
-}

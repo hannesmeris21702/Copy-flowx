@@ -2,15 +2,13 @@ import { BotConfig } from '../types';
 import { logger } from '../utils/logger';
 import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
-import { PositionMonitor } from './positionMonitor';
-import { RebalanceService } from './rebalanceService';
+import { MonitorService } from './monitorService';
 
-export class RebalancingBot {
+export class MonitoringBot {
   private config: BotConfig;
   private suiClient: SuiClientService;
   private cetusService: CetusService;
-  private positionMonitor: PositionMonitor;
-  private rebalanceService: RebalanceService;
+  private monitorService: MonitorService;
   private isRunning: boolean = false;
   private intervalId: NodeJS.Timeout | null = null;
   
@@ -18,12 +16,7 @@ export class RebalancingBot {
     this.config = config;
     this.suiClient = new SuiClientService(config);
     this.cetusService = new CetusService(this.suiClient, config);
-    this.positionMonitor = new PositionMonitor(this.cetusService, config);
-    this.rebalanceService = new RebalanceService(
-      this.suiClient,
-      this.cetusService,
-      config
-    );
+    this.monitorService = new MonitorService(this.cetusService, config);
   }
   
   async start(): Promise<void> {
@@ -33,15 +26,18 @@ export class RebalancingBot {
     }
     
     this.isRunning = true;
-    logger.info('Starting rebalancing bot...');
+    logger.info('Starting monitoring bot...');
+    logger.info('NOTE: This bot only monitors positions, it does not execute trades');
     logger.info(`Check interval: ${this.config.checkIntervalMs}ms`);
-    logger.info(`Rebalance threshold: ${this.config.rebalanceThresholdPercent}%`);
-    logger.info(`Range width: ${this.config.rangeWidthPercent}%`);
+    logger.info(`Alert threshold: ${this.config.rebalanceThresholdPercent}%`);
+    logger.info(`Suggested range width: ${this.config.rangeWidthPercent}%`);
     
-    await this.checkAndRebalance();
+    // Run first check immediately
+    await this.checkPosition();
     
+    // Schedule periodic checks
     this.intervalId = setInterval(async () => {
-      await this.checkAndRebalance();
+      await this.checkPosition();
     }, this.config.checkIntervalMs);
     
     logger.info('Bot started successfully');
@@ -62,26 +58,15 @@ export class RebalancingBot {
     logger.info('Bot stopped');
   }
   
-  private async checkAndRebalance(): Promise<void> {
+  private async checkPosition(): Promise<void> {
     try {
-      logger.info('=== Checking position ===');
+      await this.monitorService.generateReport();
       
-      const decision = await this.positionMonitor.checkRebalanceNeeded();
+      // Report is logged by MonitorService
+      // No automated rebalancing - monitoring only
       
-      if (!decision.shouldRebalance) {
-        logger.info(`No action needed: ${decision.reason}`);
-        return;
-      }
-      
-      logger.warn(`Rebalance triggered: ${decision.reason}`);
-      
-      const { pool, position } = await this.positionMonitor.getCurrentState();
-      
-      await this.rebalanceService.rebalance(pool, position);
-      
-      logger.info('=== Rebalance completed successfully ===');
     } catch (error) {
-      logger.error('Error during check and rebalance', error);
+      logger.error('Error during position check', error);
     }
   }
 }

@@ -13,6 +13,12 @@ export class SuiClientService {
   constructor(config: BotConfig) {
     this.config = config;
     this.client = new SuiClient({ url: config.rpcUrl });
+    
+    // Validate private key format
+    if (!config.privateKey.startsWith('0x') || config.privateKey.length !== 66) {
+      throw new Error('Invalid private key format: must be 0x-prefixed 64 hex chars');
+    }
+    
     this.keypair = Ed25519Keypair.fromSecretKey(
       Buffer.from(config.privateKey.slice(2), 'hex')
     );
@@ -33,14 +39,13 @@ export class SuiClientService {
     return this.keypair.getPublicKey().toSuiAddress();
   }
   
-  async executeTransaction(tx: Transaction): Promise<SuiTransactionBlockResponse> {
+  async simulateTransaction(tx: Transaction): Promise<void> {
     try {
-      // Clone the transaction for simulation to avoid reuse issues
-      const txBytes = await tx.build({ client: this.client });
-      
-      // Simulate with the built transaction
       await withRetry(
         async () => {
+          // Build transaction for simulation
+          const txBytes = await tx.build({ client: this.client });
+          
           const result = await this.client.dryRunTransactionBlock({
             transactionBlock: txBytes,
           });
@@ -58,8 +63,32 @@ export class SuiClientService {
         this.config.maxRetryDelayMs,
         'Transaction simulation'
       );
+    } catch (error) {
+      logger.error('Transaction simulation failed', error);
+      throw error;
+    }
+  }
+  
+  async executeTransaction(tx: Transaction): Promise<SuiTransactionBlockResponse> {
+    try {
+      // First simulate (this builds the transaction)
+      await this.simulateTransaction(tx);
       
-      // Execute the original transaction
+      // Transaction is now built, cannot execute it
+      // This is a fundamental limitation - we cannot both simulate AND execute
+      // the same Transaction object
+      throw new Error(
+        'Cannot execute after simulation: Transaction object can only be built once. ' +
+        'Caller must create separate transactions for simulation and execution.'
+      );
+    } catch (error) {
+      logger.error('Transaction execution failed', error);
+      throw error;
+    }
+  }
+  
+  async executeTransactionWithoutSimulation(tx: Transaction): Promise<SuiTransactionBlockResponse> {
+    try {
       return await withRetry(
         async () => {
           const result = await this.client.signAndExecuteTransaction({

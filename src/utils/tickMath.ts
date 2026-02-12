@@ -1,7 +1,15 @@
 const Q64 = BigInt(2) ** BigInt(64);
 const Q96 = BigInt(2) ** BigInt(96);
 
+// Tick math constants (same as Uniswap V3 / Cetus)
+const MIN_TICK = -443636;
+const MAX_TICK = 443636;
+
 export function tickToSqrtPrice(tick: number): bigint {
+  if (tick < MIN_TICK || tick > MAX_TICK) {
+    throw new Error(`Tick ${tick} out of bounds [${MIN_TICK}, ${MAX_TICK}]`);
+  }
+  
   const absTick = Math.abs(tick);
   
   let ratio = absTick & 0x1 ? BigInt('0xfffcb933bd6fad37aa2d162d1a594001') : Q96;
@@ -31,25 +39,6 @@ export function tickToSqrtPrice(tick: number): bigint {
   return ratio;
 }
 
-export function sqrtPriceToTick(sqrtPrice: bigint): number {
-  // More accurate conversion using logarithm
-  // tick = floor(log(sqrtPrice / Q96) / log(sqrt(1.0001)))
-  // This is equivalent to: floor(log(sqrtPrice / Q96) / (0.5 * log(1.0001)))
-  
-  const sqrtPriceNum = Number(sqrtPrice);
-  const q96Num = Number(Q96);
-  
-  if (sqrtPriceNum <= 0 || q96Num <= 0) {
-    throw new Error('Invalid sqrt price');
-  }
-  
-  const ratio = sqrtPriceNum / q96Num;
-  const logRatio = Math.log(ratio);
-  const logSqrtBase = Math.log(Math.sqrt(1.0001));
-  
-  return Math.floor(logRatio / logSqrtBase);
-}
-
 export function getAmountAFromLiquidity(
   sqrtPriceLower: bigint,
   sqrtPriceUpper: bigint,
@@ -57,6 +46,10 @@ export function getAmountAFromLiquidity(
 ): bigint {
   if (sqrtPriceLower > sqrtPriceUpper) {
     [sqrtPriceLower, sqrtPriceUpper] = [sqrtPriceUpper, sqrtPriceLower];
+  }
+  
+  if (sqrtPriceLower === BigInt(0) || sqrtPriceUpper === BigInt(0)) {
+    throw new Error('Invalid sqrt price: cannot be zero');
   }
   
   const numerator = liquidity * (sqrtPriceUpper - sqrtPriceLower) * Q64;
@@ -78,6 +71,9 @@ export function getAmountBFromLiquidity(
 }
 
 export function alignTickToSpacing(tick: number, tickSpacing: number): number {
+  if (tickSpacing <= 0) {
+    throw new Error('Tick spacing must be positive');
+  }
   return Math.round(tick / tickSpacing) * tickSpacing;
 }
 
@@ -86,10 +82,16 @@ export function calculateTickRange(
   rangeWidthPercent: number,
   tickSpacing: number
 ): { tickLower: number; tickUpper: number } {
-  // Calculate tick range based on price percentage, not tick value
-  // For a given percentage p, the tick difference is: log(1 + p/100) / log(1.0001)
-  // This ensures the range represents the actual price percentage
+  if (rangeWidthPercent <= 0 || rangeWidthPercent > 100) {
+    throw new Error('Range width percent must be between 0 and 100');
+  }
   
+  if (tickSpacing <= 0) {
+    throw new Error('Tick spacing must be positive');
+  }
+  
+  // Calculate tick range based on price percentage
+  // For a given percentage p, the tick difference is: log(1 + p/100) / log(1.0001)
   const priceRatio = 1 + rangeWidthPercent / 100;
   const tickDelta = Math.floor(Math.log(priceRatio) / Math.log(1.0001));
   
@@ -101,6 +103,11 @@ export function calculateTickRange(
     currentTick + Math.floor(tickDelta / 2),
     tickSpacing
   );
+  
+  // Validate bounds
+  if (tickLower < MIN_TICK || tickUpper > MAX_TICK) {
+    throw new Error(`Calculated tick range [${tickLower}, ${tickUpper}] exceeds bounds`);
+  }
   
   return { tickLower, tickUpper };
 }
@@ -122,15 +129,12 @@ export function calculatePriceDeviation(
     return 0;
   }
   
+  const rangeWidth = tickUpper - tickLower;
+  if (rangeWidth === 0) return 100;
+  
   if (currentTick < tickLower) {
-    // Calculate deviation as percentage of range width
-    const rangeWidth = tickUpper - tickLower;
-    if (rangeWidth === 0) return 100; // Degenerate case
     return ((tickLower - currentTick) / rangeWidth) * 100;
   }
   
-  // currentTick > tickUpper
-  const rangeWidth = tickUpper - tickLower;
-  if (rangeWidth === 0) return 100; // Degenerate case
   return ((currentTick - tickUpper) / rangeWidth) * 100;
 }
