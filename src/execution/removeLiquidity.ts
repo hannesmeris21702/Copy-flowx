@@ -4,6 +4,7 @@
  */
 
 import { Transaction, TransactionObjectArgument } from "@mysten/sui/transactions";
+import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 import BN from "bn.js";
 import { Position } from "../entities";
 import { getLogger } from "../utils/Logger";
@@ -53,18 +54,19 @@ export function removeLiquidity(
   );
 
   // Construct Move call to remove_liquidity
-  // Function: clmm::pool::remove_liquidity
+  // Function: clmm::pool_script::remove_liquidity
   const [coinX, coinY] = tx.moveCall({
-    target: `${config.packageId}::pool::remove_liquidity`,
+    target: `${config.packageId}::pool_script::remove_liquidity`,
     typeArguments: [pool.coinX.coinType, pool.coinY.coinType],
     arguments: [
       tx.object(config.globalConfigId), // Global config
+      tx.object(config.poolsId), // Pools registry
       tx.object(pool.id), // Pool
       tx.object(position.id), // Position NFT
       tx.pure.u128(position.liquidity), // Liquidity to remove
       tx.pure.u64(minAmountX), // Min amount X
       tx.pure.u64(minAmountY), // Min amount Y
-      tx.object("0x6"), // Clock object
+      tx.object(SUI_CLOCK_OBJECT_ID), // Clock object
     ],
   });
 

@@ -4,6 +4,7 @@
  */
 
 import { Transaction, TransactionObjectArgument } from "@mysten/sui/transactions";
+import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 import BN from "bn.js";
 import { Pool } from "../entities";
 import { Percent } from "../utils/sdkTypes";
@@ -77,33 +78,35 @@ export function executeSwap(
   if (isXToY) {
     // Swap X to Y
     [coinOut] = tx.moveCall({
-      target: `${config.packageId}::pool::swap_a2b`,
+      target: `${config.packageId}::pool_script::swap_a2b`,
       typeArguments: [pool.coinX.coinType, pool.coinY.coinType],
       arguments: [
         tx.object(config.globalConfigId), // Global config
+        tx.object(config.poolsId), // Pools registry
         tx.object(pool.id), // Pool
         coinIn, // Input coin (X)
         tx.pure.u64(amountIn.toString()), // Amount in
         tx.pure.u64(minAmountOut.toString()), // Min amount out
         tx.pure.u128(params.sqrtPriceLimit || "0"), // Price limit (0 = no limit)
         tx.pure.bool(true), // Is exact input
-        tx.object("0x6"), // Clock object
+        tx.object(SUI_CLOCK_OBJECT_ID), // Clock object
       ],
     });
   } else {
     // Swap Y to X
     [coinOut] = tx.moveCall({
-      target: `${config.packageId}::pool::swap_b2a`,
+      target: `${config.packageId}::pool_script::swap_b2a`,
       typeArguments: [pool.coinX.coinType, pool.coinY.coinType],
       arguments: [
         tx.object(config.globalConfigId), // Global config
+        tx.object(config.poolsId), // Pools registry
         tx.object(pool.id), // Pool
         coinIn, // Input coin (Y)
         tx.pure.u64(amountIn.toString()), // Amount in
         tx.pure.u64(minAmountOut.toString()), // Min amount out
         tx.pure.u128(params.sqrtPriceLimit || "0"), // Price limit (0 = no limit)
         tx.pure.bool(true), // Is exact input
-        tx.object("0x6"), // Clock object
+        tx.object(SUI_CLOCK_OBJECT_ID), // Clock object
       ],
     });
   }

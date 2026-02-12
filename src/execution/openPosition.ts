@@ -4,6 +4,7 @@
  */
 
 import { Transaction, TransactionObjectArgument } from "@mysten/sui/transactions";
+import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 import BN from "bn.js";
 import { Pool } from "../entities";
 import { getLogger } from "../utils/Logger";
@@ -65,6 +66,12 @@ export function openPosition(
   const minAmountX = params.minAmountX || amountX;
   const minAmountY = params.minAmountY || amountY;
 
+  // Handle negative ticks properly
+  const tickLowerAbs = Math.abs(tickLower);
+  const tickUpperAbs = Math.abs(tickUpper);
+  const isTickLowerNegative = tickLower < 0;
+  const isTickUpperNegative = tickUpper < 0;
+
   // Step 1: Mint position NFT
   logger.info("OpenPosition: Minting position NFT...");
   const position = tx.moveCall({
@@ -72,24 +79,27 @@ export function openPosition(
     arguments: [tx.object(config.poolsId)],
   });
 
-  // Step 2: Open position with liquidity
+  // Step 2: Open position with liquidity using pool_script
   logger.info("OpenPosition: Opening position with liquidity...");
   const [remainingX, remainingY] = tx.moveCall({
-    target: `${config.packageId}::pool::open_position`,
+    target: `${config.packageId}::pool_script::open_position`,
     typeArguments: [pool.coinX.coinType, pool.coinY.coinType],
     arguments: [
       tx.object(config.globalConfigId), // Global config
+      tx.object(config.poolsId), // Pools registry
       tx.object(pool.id), // Pool
       position, // Position NFT
-      tx.pure.u32(tickLower), // Tick lower (i32 in Move)
-      tx.pure.u32(tickUpper), // Tick upper (i32 in Move)
+      tx.pure.u32(tickLowerAbs), // Tick lower (absolute value)
+      tx.pure.bool(isTickLowerNegative), // Is tick lower negative
+      tx.pure.u32(tickUpperAbs), // Tick upper (absolute value)
+      tx.pure.bool(isTickUpperNegative), // Is tick upper negative
       coinX, // Coin X
       coinY, // Coin Y
       tx.pure.u64(amountX.toString()), // Desired amount X
       tx.pure.u64(amountY.toString()), // Desired amount Y
       tx.pure.u64(minAmountX.toString()), // Min amount X
       tx.pure.u64(minAmountY.toString()), // Min amount Y
-      tx.object("0x6"), // Clock object
+      tx.object(SUI_CLOCK_OBJECT_ID), // Clock object
     ],
   });
 

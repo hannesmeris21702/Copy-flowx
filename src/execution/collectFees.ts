@@ -4,6 +4,7 @@
  */
 
 import { Transaction, TransactionObjectArgument } from "@mysten/sui/transactions";
+import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 import { Position } from "../entities";
 import { getLogger } from "../utils/Logger";
 import { getCetusConfig } from "../sdk/cetusSDK";
@@ -41,15 +42,17 @@ export function collectFees(
   const pool = position.pool;
 
   // Construct Move call to collect_fee
-  // Function: clmm::pool::collect_fee
+  // Function: clmm::pool_script::collect_fee
   const [feeX, feeY] = tx.moveCall({
-    target: `${config.packageId}::pool::collect_fee`,
+    target: `${config.packageId}::pool_script::collect_fee`,
     typeArguments: [pool.coinX.coinType, pool.coinY.coinType],
     arguments: [
       tx.object(config.globalConfigId), // Global config
+      tx.object(config.poolsId), // Pools registry
       tx.object(pool.id), // Pool
       tx.object(position.id), // Position NFT
-      tx.pure.bool(true), // Collect all fees
+      tx.pure.u64("18446744073709551615"), // Max amount X (collect all)
+      tx.pure.u64("18446744073709551615"), // Max amount Y (collect all)
     ],
   });
 
@@ -94,9 +97,9 @@ export function collectReward(
   }
 
   // Construct Move call to collect_reward
-  // Function: clmm::pool::collect_reward
-  const [reward] = tx.moveCall({
-    target: `${config.packageId}::pool::collect_reward`,
+  // Function: clmm::pool_script::collect_reward
+  const reward = tx.moveCall({
+    target: `${config.packageId}::pool_script::collect_reward`,
     typeArguments: [
       pool.coinX.coinType,
       pool.coinY.coinType,
@@ -104,11 +107,12 @@ export function collectReward(
     ],
     arguments: [
       tx.object(config.globalConfigId), // Global config
+      tx.object(config.poolsId), // Pools registry
       tx.object(pool.id), // Pool
       tx.object(position.id), // Position NFT
-      tx.object(poolReward.coin.coinType), // Reward vault (simplified)
-      tx.pure.bool(true), // Collect all rewards
-      tx.object("0x6"), // Clock object
+      tx.pure.u64(rewardIndex), // Reward index
+      tx.pure.u64("18446744073709551615"), // Max amount (collect all)
+      tx.object(SUI_CLOCK_OBJECT_ID), // Clock object
     ],
   });
 
