@@ -138,8 +138,10 @@ export class SuiClientService {
         logger.debug(`Attempt ${attempt}/${maxRetries}: Executing PTB...`);
         
         // Execute the transaction
-        // Note: The Sui SDK's signAndExecuteTransaction handles Transaction building internally
-        // The Transaction object can be passed multiple times if needed for retries
+        // Note: The Sui SDK's signAndExecuteTransaction accepts a Transaction object
+        // and builds it internally if not already built. The SDK handles transaction
+        // state appropriately for retry scenarios. Each call to signAndExecuteTransaction
+        // will attempt to build and execute the transaction.
         const result = await this.client.signAndExecuteTransaction({
           transaction: tx,
           signer: this.keypair,

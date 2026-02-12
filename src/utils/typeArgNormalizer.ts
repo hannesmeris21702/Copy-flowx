@@ -32,7 +32,7 @@ export function normalizeTypeArguments(typeArgs: string[]): string[] {
  * Validates that a type argument is properly normalized
  * A normalized type argument should:
  * - Be parseable by TypeTagSerializer
- * - Have full-length addresses (64 hex chars)
+ * - Re-serialize to the same canonical form (idempotent normalization)
  * 
  * @param typeArg Type argument string to validate
  * @returns true if the type argument is properly normalized, false otherwise
