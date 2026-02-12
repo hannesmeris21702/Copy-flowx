@@ -105,18 +105,20 @@ export class RebalanceService {
   ): Promise<Transaction> {
     const ptb = new Transaction();
     const sdk = this.cetusService.getSDK();
+    
+    logger.info('Building atomic PTB with all operations using SDK builders...');
+    logger.info('=== COIN OBJECT FLOW TRACE ===');
+    
+    // Get SDK configuration
     const packageId = sdk.sdkOptions.integrate.published_at;
     const globalConfigId = sdk.sdkOptions.clmm_pool.config!.global_config_id;
     
-    logger.info('Building atomic PTB with all operations...');
-    logger.info('=== COIN OBJECT FLOW TRACE ===');
-    
     // Step 1: Remove liquidity from old position
-    // Using SDK format: pool_script::remove_liquidity
-    // Returns: [Coin<A>, Coin<B>]
+    // Use SDK builder pattern: pool_script::remove_liquidity
     logger.info('Step 1: Remove liquidity → returns [coinA, coinB]');
     const [removedCoinA, removedCoinB] = ptb.moveCall({
       target: `${packageId}::pool_script::remove_liquidity`,
+      typeArguments: [pool.coinTypeA, pool.coinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -126,22 +128,19 @@ export class RebalanceService {
         ptb.pure.u64(minAmountB.toString()),
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
     });
     logger.info('  ✓ Captured: removedCoinA, removedCoinB');
     
     // Step 2: Collect fees from old position
-    // Using SDK format: pool_script_v2::collect_fee
-    // Returns: [Coin<A>, Coin<B>]
-    // Requires zero-value coin inputs
+    // Use SDK builder pattern: pool_script_v2::collect_fee
     logger.info('Step 2: Collect fees → returns [feeCoinA, feeCoinB]');
     
-    // Create zero-value coins for collect_fee (required by pool_script_v2)
     const zeroCoinA = coinWithBalance({ type: pool.coinTypeA, balance: 0 })(ptb);
     const zeroCoinB = coinWithBalance({ type: pool.coinTypeB, balance: 0 })(ptb);
     
     const [feeCoinA, feeCoinB] = ptb.moveCall({
       target: `${packageId}::pool_script_v2::collect_fee`,
+      typeArguments: [pool.coinTypeA, pool.coinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -149,27 +148,21 @@ export class RebalanceService {
         zeroCoinA,
         zeroCoinB,
       ],
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
     });
     logger.info('  ✓ Captured: feeCoinA, feeCoinB');
     
     // Step 3: Merge removed liquidity with collected fees
-    // Consumes: feeCoinA into removedCoinA, feeCoinB into removedCoinB
-    // After merge: removedCoinA contains (removed + fees), removedCoinB contains (removed + fees)
     logger.info('Step 3: Merge coins');
-    logger.info('  mergeCoins(removedCoinA, [feeCoinA]) → removedCoinA now contains both');
-    logger.info('  mergeCoins(removedCoinB, [feeCoinB]) → removedCoinB now contains both');
     ptb.mergeCoins(removedCoinA, [feeCoinA]);
     ptb.mergeCoins(removedCoinB, [feeCoinB]);
     logger.info('  ✓ After merge: removedCoinA, removedCoinB contain all funds');
     
-    // Step 4: Close old position (cleanup NFT)
-    // Using SDK format: pool_script::close_position
-    // Takes: config, pool_id, pos_id, min_amount_a, min_amount_b, clock
-    // No coin objects returned, just consumes the position NFT
-    logger.info('Step 4: Close old position (NFT cleanup, no coins)');
+    // Step 4: Close old position
+    // Use SDK builder pattern: pool_script::close_position
+    logger.info('Step 4: Close old position (NFT cleanup)');
     ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
+      typeArguments: [pool.coinTypeA, pool.coinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
@@ -178,13 +171,10 @@ export class RebalanceService {
         ptb.pure.u64(minAmountB.toString()),
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
     });
     logger.info('  ✓ Position closed');
     
     // Step 5: Swap to optimal ratio if needed
-    // CRITICAL: Swap consumes input coin and returns output coin
-    // Must track which coins are valid after swap
     logger.info('Step 5: Swap to optimal ratio (if needed)');
     const { coinA: finalCoinA, coinB: finalCoinB } = this.addSwapIfNeeded(
       ptb,
@@ -198,52 +188,43 @@ export class RebalanceService {
     logger.info('  ✓ Final coins ready: finalCoinA, finalCoinB');
     
     // Step 6: Open new position
-    // Using SDK format: pool_script::open_position
-    // The SDK converts signed ticks to u32 using asUintN(BigInt(tick))
-    // Returns: Position NFT
+    // Use SDK builder pattern with proper tick conversion from SDK's asUintN
     logger.info('Step 6: Open new position → returns newPosition NFT');
     
-    // Convert ticks to u32 format using BigInt.asUintN
+    // Convert signed ticks to u32 using BigInt.asUintN (SDK pattern)
     const tickLowerU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickLower)));
     const tickUpperU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickUpper)));
     
     const newPosition = ptb.moveCall({
       target: `${packageId}::pool_script::open_position`,
+      typeArguments: [pool.coinTypeA, pool.coinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         ptb.pure.u32(tickLowerU32),
         ptb.pure.u32(tickUpperU32),
       ],
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
     });
     logger.info('  ✓ Captured: newPosition NFT');
     
     // Step 7: Add liquidity to new position
-    // Using SDK format: pool_script_v2::add_liquidity_by_fix_coin
-    // Consumes: finalCoinA, finalCoinB
-    // These are the exact coins from remove+collect+swap operations
+    // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
     logger.info('Step 7: Add liquidity → consumes finalCoinA, finalCoinB');
-    
-    // Calculate amounts to add - use the coins we have
-    // fix_amount_a = true means we'll use all of coinA and calculate needed coinB
-    const minAddAmountA = minAmountA;
-    const minAddAmountB = minAmountB;
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
+      typeArguments: [pool.coinTypeA, pool.coinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         newPosition,
-        finalCoinA,  // PROOF: This is the exact coin from swap output or original removedCoinA
-        finalCoinB,  // PROOF: This is the exact coin from swap output or original removedCoinB
-        ptb.pure.u64(minAddAmountA.toString()),
-        ptb.pure.u64(minAddAmountB.toString()),
-        ptb.pure.bool(true), // fix_amount_a: use amount A as the fixed amount
+        finalCoinA,
+        finalCoinB,
+        ptb.pure.u64(minAmountA.toString()),
+        ptb.pure.u64(minAmountB.toString()),
+        ptb.pure.bool(true), // fix_amount_a
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
-      typeArguments: [pool.coinTypeA, pool.coinTypeB],
     });
     logger.info('  ✓ Liquidity added, coins consumed');
     
@@ -253,12 +234,6 @@ export class RebalanceService {
     logger.info('  ✓ Position transferred');
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
-    logger.info('PROOF: All coin objects accounted for:');
-    logger.info('  - removedCoinA, removedCoinB: created, merged with fees, either used directly or consumed by swap');
-    logger.info('  - feeCoinA, feeCoinB: created, merged into removed coins');
-    logger.info('  - swap outputs: if swap occurred, replace one of the coins');
-    logger.info('  - finalCoinA, finalCoinB: passed to add_liquidity and consumed');
-    logger.info('  - newPosition: created, transferred to sender');
     logger.info('NO COIN OBJECTS DROPPED OR UNTRANSFERRED');
     
     return ptb;
@@ -278,90 +253,73 @@ export class RebalanceService {
     const sqrtPriceLower = tickToSqrtPrice(newRange.tickLower);
     const sqrtPriceUpper = tickToSqrtPrice(newRange.tickUpper);
     
-    // Sqrt price limits for swaps (from Cetus SDK - minimum and maximum valid sqrt prices)
+    // Sqrt price limits for swaps (from Cetus SDK)
     const MIN_SQRT_PRICE = '4295048016';
     const MAX_SQRT_PRICE = '79226673515401279992447579055';
     
-    // Maximum u64 value for swap amount (swap all available coins)
+    // Maximum u64 value for swap amount
     const U64_MAX = '18446744073709551615';
     
-    // SDK uses router module for swaps, with both coins as input
-    // The coin we're not swapping should be zero-value
-    // Returns: [Coin<A>, Coin<B>] where one is the output and the other is remainder
-    
     if (sqrtPriceCurrent < sqrtPriceLower) {
-      // Price below range - need token A
-      // Swap ALL of coinB to get more coinA (b2a, a2b=false)
+      // Price below range - need token A, swap B to A
       logger.info('  Price below new range - swapping ALL coinB to coinA');
       
-      // For a2b=false (swap B to A), we need coinA with 0 value and coinB with the amount
       const zeroCoinA = coinWithBalance({ type: pool.coinTypeA, balance: 0 })(ptb);
       
-      // Using SDK format: router::swap
-      // Returns [Coin<A> with swapped amount, Coin<B> with remainder]
+      // Use SDK builder pattern: router::swap
       const [swappedCoinA, remainderCoinB] = ptb.moveCall({
         target: `${packageId}::router::swap`,
+        typeArguments: [pool.coinTypeA, pool.coinTypeB],
         arguments: [
           ptb.object(globalConfigId),
           ptb.object(pool.id),
-          zeroCoinA,  // coin_a (zero value input)
-          coinB,      // coin_b (consumed)
+          zeroCoinA,
+          coinB,
           ptb.pure.bool(false), // a2b: false = B to A
-          ptb.pure.bool(true), // by_amount_in: swap exact amount of B
-          ptb.pure.u64(U64_MAX), // amount: u64::MAX to swap all
-          ptb.pure.u128(MAX_SQRT_PRICE), // sqrt_price_limit
-          ptb.pure.bool(false), // use_coin_value: always false per SDK
+          ptb.pure.bool(true), // by_amount_in
+          ptb.pure.u64(U64_MAX),
+          ptb.pure.u128(MAX_SQRT_PRICE),
+          ptb.pure.bool(false), // use_coin_value
           ptb.object(SUI_CLOCK_OBJECT_ID),
         ],
-        typeArguments: [pool.coinTypeA, pool.coinTypeB],
       });
       
-      // Merge the swapped coinA into existing coinA
       ptb.mergeCoins(coinA, [swappedCoinA]);
       logger.info('  ✓ Swapped: coinB consumed, output merged into coinA');
       
-      // Return coinA with all swapped funds, and remainderCoinB (should be zero/dust)
-      logger.info('  ✓ Using remainderCoinB (should be minimal after swapping all)');
       return { coinA, coinB: remainderCoinB };
       
     } else if (sqrtPriceCurrent > sqrtPriceUpper) {
-      // Price above range - need token B
-      // Swap ALL of coinA to get more coinB (a2b, a2b=true)
+      // Price above range - need token B, swap A to B
       logger.info('  Price above new range - swapping ALL coinA to coinB');
       
-      // For a2b=true (swap A to B), we need coinB with 0 value and coinA with the amount
       const zeroCoinB = coinWithBalance({ type: pool.coinTypeB, balance: 0 })(ptb);
       
-      // Using SDK format: router::swap
-      // Returns [Coin<A> with remainder, Coin<B> with swapped amount]
+      // Use SDK builder pattern: router::swap
       const [remainderCoinA, swappedCoinB] = ptb.moveCall({
         target: `${packageId}::router::swap`,
+        typeArguments: [pool.coinTypeA, pool.coinTypeB],
         arguments: [
           ptb.object(globalConfigId),
           ptb.object(pool.id),
-          coinA,      // coin_a (consumed)
-          zeroCoinB,  // coin_b (zero value input)
+          coinA,
+          zeroCoinB,
           ptb.pure.bool(true), // a2b: true = A to B
-          ptb.pure.bool(true), // by_amount_in: swap exact amount of A
-          ptb.pure.u64(U64_MAX), // amount: u64::MAX to swap all
-          ptb.pure.u128(MIN_SQRT_PRICE), // sqrt_price_limit
-          ptb.pure.bool(false), // use_coin_value: always false per SDK
+          ptb.pure.bool(true), // by_amount_in
+          ptb.pure.u64(U64_MAX),
+          ptb.pure.u128(MIN_SQRT_PRICE),
+          ptb.pure.bool(false), // use_coin_value
           ptb.object(SUI_CLOCK_OBJECT_ID),
         ],
-        typeArguments: [pool.coinTypeA, pool.coinTypeB],
       });
       
-      // Merge the swapped coinB into existing coinB
       ptb.mergeCoins(coinB, [swappedCoinB]);
       logger.info('  ✓ Swapped: coinA consumed, output merged into coinB');
       
-      // Return remainderCoinA (should be zero/dust) and coinB with all swapped funds
-      logger.info('  ✓ Using remainderCoinA (should be minimal after swapping all)');
       return { coinA: remainderCoinA, coinB };
       
     } else {
-      // Price in range - need both tokens in proportion
-      // Use coins as-is without swapping
+      // Price in range - use both tokens as-is
       logger.info('  Price in new range - using both coins as-is');
       return { coinA, coinB };
     }
