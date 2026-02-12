@@ -1,269 +1,287 @@
-# CLMM Position Rebalancer
+# Cetus CLMM Position Manager
 
-Automated rebalancing bot for Concentrated Liquidity Market Maker (CLMM) positions on Sui blockchain. This bot monitors and automatically rebalances liquidity positions to maintain optimal price ranges and maximize yield.
+A production-ready tool for managing Cetus Protocol CLMM positions on Sui blockchain.
 
 ## Features
 
-- **Protocol Support**: Works with Cetus CLMM (extensible to Turbos and KriyaDEX)
-- **Automated Rebalancing**: Continuously monitors positions and rebalances when price moves outside target ranges
-- **Reward Compounding**: Automatically compounds rewards based on configurable thresholds and schedules
-- **Modular Architecture**: Production-grade layered architecture (SDK, Monitor, Engine, Execution, Risk)
-- **Price Impact Protection**: Configurable price impact thresholds to prevent unfavorable trades
-- **Risk Management**: Slippage checks, cooldown guards, volatility protection
-- **Strategy Presets**: Pre-configured SAFE and AGGRESSIVE modes
-- **Flexible Configuration**: Environment-based configuration for different trading strategies
-- **Built-in Logging**: Comprehensive logging system for monitoring bot activities
-- **Event Monitoring**: Detects large swaps and can trigger position adjustments
+### Monitoring Mode (Default - Safe)
+- Monitors your Cetus CLMM position health
+- Checks if current price is within position range
+- Calculates price deviation when out of range
+- Suggests optimal rebalancing ranges
+- Alerts when deviation exceeds threshold
+- Logs all data for manual review
+- **No transactions executed**
 
-## Modular Architecture
+### Automated Rebalancing Mode (Advanced)
+- **⚠️ Executes transactions automatically**
+- Uses atomic Programmable Transaction Blocks (PTB)
+- All operations in single transaction (all-or-nothing)
+- Proper slippage protection
+- Gas safety checks
+- Automatic rebalancing when thresholds exceeded
 
-This bot uses a production-grade modular architecture with clear separation of concerns:
+## Atomic Rebalancing Implementation
 
-```
-src/
-  sdk/          - Sui client and protocol SDK initialization
-  monitor/      - Pool, position, and event monitoring
-  engine/       - Strategy logic, range calculation, value preservation
-  execution/    - Granular Move call functions (remove liquidity, collect fees, swap, open position)
-  risk/         - Safety guards (slippage, price impact, cooldown, volatility)
-  utils/        - Utilities and helpers
-  Worker.ts     - Main orchestrator
-  index.ts      - Entry point
-```
+The rebalancing uses a **single Programmable Transaction Block** with all operations:
 
-For detailed architecture documentation, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+1. Remove liquidity from old position
+2. Collect accumulated fees
+3. Merge liquidity with fees
+4. Close old position NFT
+5. Swap tokens to optimal ratio (if needed)
+6. Open new position at current price
+7. Add liquidity to new position
+8. Transfer new position to wallet
 
-## Architecture
-
-The bot consists of several key layers:
-
-- **SDK Layer**: Unified interface to Sui blockchain and CLMM protocols
-- **Monitor Layer**: Pool watcher, position watcher, event listener
-- **Engine Layer**: Strategy logic, range calculator, value preservation
-- **Execution Layer**: Granular Move call functions for each operation
-- **Risk Layer**: Safety guards (slippage, price impact, cooldown, volatility)
-- **Worker**: Main orchestrator that manages the rebalancing process
-- **PositionManager**: Handles position creation, closing, and management
-- **Pool Providers**: Interface with different CLMM protocols
-- **Price Providers**: Aggregate price data from Pyth oracle
-- **Transaction Executor**: Manages Sui blockchain transactions with caching
-
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed documentation.
-
-## How It Works
-
-### Core Rebalancing Logic
-
-The CLMM position rebalancer operates on a continuous monitoring loop that evaluates whether current liquidity positions need to be adjusted based on price movements. Here's the detailed workflow:
-
-#### 1. Position Monitoring
-
-The bot continuously monitors:
-
-- **Current Pool Price**: Real-time price from the target liquidity pool
-- **Position Range**: Current active liquidity range (lower and upper price bounds)
-- **Price Deviation**: How far the current price has moved from the position center
-
-#### 2. Rebalancing Triggers
-
-The bot triggers a rebalance when:
-
-- **Out of Range**: Current price moves outside the active liquidity range
-- **Range Drift**: Price moves significantly within range but position becomes inefficient
-- **Scheduled Rebalancing**: Time-based triggers for proactive management
-
-#### 3. Reward Compounding Logic
-
-##### Threshold Evaluation
-
-The bot compounds rewards when either condition is met:
-
-- **Time Condition**: `current_time - last_compound_time >= COMPOUND_REWARDS_SCHEDULE_MS`
-- **Value Condition**: `reward_value_usd >= REWARD_THRESHOLD_USD`
-
-##### Reward Value Calculation
-
-```
-Reward Value USD = Σ(reward_token_amount × token_price_usd)
-```
-
-The bot aggregates all claimable rewards across different tokens and converts to USD value.
+**All operations execute atomically** - if any step fails, the entire transaction reverts (no partial state).
 
 ## Installation
 
-1. Clone the repository:
-
 ```bash
-git clone <repository-url>
-cd clmm-position-rebalancer
-```
-
-2. Install dependencies:
-
-```bash
-yarn install
-```
-
-3. Build the project:
-
-```bash
-yarn build
+npm install
 ```
 
 ## Configuration
 
-Create a `.env` file in the root directory based on `.env.example`.
+Copy `.env.example` to `.env`:
 
-### Strategy Modes
+```bash
+# Required
+PRIVATE_KEY=0x...          # Your wallet private key
+POOL_ID=0x...             # Cetus pool to manage
+POSITION_ID=0x...         # Your position NFT ID
 
-The bot supports two pre-configured strategy modes:
+# Mode selection
+ENABLE_REBALANCING=false  # Set to 'true' for automated rebalancing
 
-#### SAFE Mode (Default)
-Conservative parameters for stable, low-risk operation:
-- Wider price range (5%)
-- Strict slippage tolerance (1%)
-- Longer cooldown between rebalances (1 hour)
-- Lower volatility tolerance (10%)
-- Higher reward threshold ($10)
-
-#### AGGRESSIVE Mode
-Active parameters for maximizing yield with higher risk:
-- Tighter price range (2%)
-- Higher slippage tolerance (5%)
-- Shorter cooldown (10 minutes)
-- Higher volatility tolerance (20%)
-- Lower reward threshold ($1)
-
-### Configuration Options
-
-```env
-# Protocol to use (CETUS for Cetus CLMM)
-PROTOCOL=CETUS
-
-# Strategy mode: SAFE or AGGRESSIVE
-STRATEGY_MODE=SAFE
-
-# Target pool ID for rebalancing (Cetus pool object ID)
-TARGET_POOL=0x...
-
-# Private key for the wallet (without 0x prefix)
-PRIVATE_KEY=your_private_key_here
-
-# Price range percentages (in basis points, 10000 = 100%)
-BPRICE_PERCENT=50                     # Bottom price % (0.5%)
-TPRICE_PERCENT=10                     # Top price % (0.1%)
-
-# Slippage tolerance (in basis points)
-SLIPPAGE_TOLERANCE=50000              # 5%
-
-# Price impact threshold (in basis points)
-PRICE_IMPACT_PERCENT_THRESHOLD=-5000  # -0.5%
-
-# Minimum amounts for operations
-MIN_ZAP_AMOUNT_X=1000000
-MIN_ZAP_AMOUNT_Y=1000000
-
-# Position size multiplier
-MULTIPLIER=1
-
-# Reward compounding
-REWARD_THRESHOLD_USD=1                # Minimum USD value to compound
-COMPOUND_REWARDS_SCHEDULE_MS=3600000  # 1 hour
-
-# Risk management
-REBALANCE_COOLDOWN_MS=3600000         # 1 hour cooldown between rebalances
-MAX_VOLATILITY_PERCENT=1000           # 10% max volatility
-
-# Event monitoring
-LARGE_SWAP_THRESHOLD_USD=100000       # $100k threshold for large swaps
+# Optional
+RPC_URL=https://fullnode.mainnet.sui.io:443
+CHECK_INTERVAL_MS=60000   # Check every 60 seconds
+REBALANCE_THRESHOLD_PERCENT=2.0  # Rebalance if 2% outside range
+RANGE_WIDTH_PERCENT=5.0   # New position will be 5% wide
+MAX_SLIPPAGE_PERCENT=1.0  # Maximum acceptable slippage
+MAX_GAS_PRICE=1000000000  # Maximum gas price in MIST
 ```
-
-### Optional Configuration
-
-```env
-# Reward threshold in USD before compounding
-REWARD_THRESHOLD_USD=10
-
-# Address for tracking volume (optional)
-TRACKING_VOLUME_ADDRESS=0x...
-
-# Rebalance retry attempts
-REBALANCE_RETRIES=3
-
-# RPC endpoint (defaults to Sui mainnet)
-JSON_RPC_ENDPOINT=https://fullnode.mainnet.sui.io:443
-
-# Log level (debug, info, warn, error)
-LOG_LEVEL=info
-```
-
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed configuration and usage examples.
 
 ## Usage
 
-### Running the Bot
-
-Start the rebalancing bot:
+### Monitoring Only (Default - Recommended)
 
 ```bash
-node dist/index.js
+npm run build
+npm start
 ```
 
 The bot will:
+- Check position every 60 seconds
+- Log current state and health
+- Alert if deviation exceeds threshold
+- **NOT execute any transactions**
 
-1. Initialize with the provided configuration
-2. Monitor the target pool for price movements
-3. Automatically rebalance positions when price moves outside the configured range
-4. Compound rewards based on the schedule and threshold settings
+### Automated Rebalancing (Advanced)
 
-### Testing
+⚠️ **WARNING**: This mode will execute transactions and spend gas automatically.
 
-Run the test suite:
-
+Set in `.env`:
 ```bash
-yarn test
+ENABLE_REBALANCING=true
 ```
 
-## Key Concepts
+Then run:
+```bash
+npm run build
+npm start
+```
 
-### Price Range Strategy
+The bot will:
+- Monitor position continuously
+- Automatically rebalance when threshold exceeded
+- Execute atomic PTB transactions
+- Handle slippage and gas safety
 
-The bot maintains liquidity positions within a target price range:
+## How It Works
 
-- **BPRICE_PERCENT**: Bottom price percentage below current price
-- **TPRICE_PERCENT**: Top price percentage above current price
+### Position Monitoring
 
-When the current price moves outside this range, the bot automatically rebalances by:
+1. Fetches pool and position data from Cetus
+2. Checks if current price is within position range
+3. Calculates price deviation percentage
+4. Determines if rebalancing is needed
 
-1. Closing the current position
-2. Collecting any available rewards
-3. Opening a new position centered around the current price
+### Atomic Rebalancing (when enabled)
 
-### Reward Compounding
+When price moves beyond threshold:
 
-The bot can automatically compound rewards based on:
+```
+Current tick: 12000
+Position range: [10000, 11000]
+Deviation: 10% (exceeds 2% threshold)
 
-- **Time Schedule**: Compound rewards at regular intervals
-- **USD Threshold**: Only compound when rewards exceed a minimum USD value
+Action: Atomic rebalance
+- Remove all liquidity
+- Collect fees
+- Close old position
+- Calculate new range [11500, 12500] (centered on current price)
+- Swap tokens if needed
+- Open new position
+- Add liquidity
 
-### Risk Management
+Result: Position centered on current price, earning fees again
+```
 
-- **Slippage Protection**: Configurable slippage tolerance for all trades
-- **Price Impact Limits**: Prevents trades with excessive price impact
-- **Minimum Amounts**: Ensures positions meet minimum liquidity requirements
+### Safety Features
 
-## Supported Protocols
+#### Monitoring Mode
+✅ Read-only operations  
+✅ No transaction execution  
+✅ No gas spending  
+✅ Zero risk  
 
-- **Cetus CLMM**: Concentrated liquidity market maker on Sui blockchain
+#### Rebalancing Mode
+✅ Atomic PTB (all-or-nothing)  
+✅ Slippage protection on all operations  
+✅ Gas price checks before execution  
+✅ Tick spacing validation  
+✅ Bounds checking  
+✅ Automatic rollback on failure  
 
+## Project Structure
 
+```
+src/
+├── config/               # Environment validation
+├── services/
+│   ├── bot.ts               # Monitoring-only orchestrator
+│   ├── rebalancingBot.ts    # Automated rebalancing orchestrator
+│   ├── rebalanceService.ts  # Atomic PTB rebalancing logic
+│   ├── cetusService.ts      # Cetus SDK integration
+│   ├── monitorService.ts    # Position monitoring
+│   └── suiClient.ts         # Sui RPC client
+├── utils/
+│   ├── logger.ts            # Winston logging
+│   ├── retry.ts             # Exponential backoff
+│   └── tickMath.ts          # CLMM calculations
+└── types/                # TypeScript interfaces
+```
 
-## Monitoring and Logging
+## Technical Details
 
-The bot includes comprehensive logging to track:
+### CLMM Mathematics
 
-- Position rebalancing events
-- Reward compounding activities
-- Price movements and range violations
-- Transaction successes and failures
-- Performance metrics
+Uses verified Uniswap V3 / Cetus formulas:
+- Tick to sqrt price conversion
+- Amount calculations from liquidity
+- Price-based range calculations (not tick-based)
+- Proper Q64 fixed-point arithmetic
+
+### Atomic Transaction Structure
+
+Single PTB with chained operations:
+```typescript
+const ptb = new Transaction();
+
+// All operations use returned coin objects
+const [coinA, coinB] = ptb.moveCall({ target: 'remove_liquidity', ... });
+const [feeA, feeB] = ptb.moveCall({ target: 'collect_fee', ... });
+ptb.mergeCoins(coinA, [feeA]);
+// ... continue chaining
+
+// Single execution
+await client.signAndExecuteTransaction({ transaction: ptb });
+```
+
+### Error Handling
+
+**Monitoring Mode**: Logs errors, continues running
+
+**Rebalancing Mode**: 
+- Pre-validates gas price
+- Validates tick spacing
+- Calculates expected amounts
+- If any validation fails → abort before execution
+- If PTB fails → entire transaction reverts (clean state)
+
+## Examples
+
+### Monitor Output
+
+```
+=== Position Monitor Report ===
+Pool: 0xabc...
+Position: 0xdef...
+Current Tick: 12500
+Position Range: [12000, 13000]
+In Range: YES
+Position is healthy
+===============================
+```
+
+When out of range:
+```
+In Range: NO
+Price Deviation: 3.45%
+Suggested New Range: [12450, 12950]
+ALERT: Deviation exceeds threshold (2%)
+Rebalancing will be triggered
+```
+
+### Rebalance Output
+
+```
+=== Starting Atomic PTB Rebalance ===
+Current tick: 12500
+Old range: [10000, 11000]
+New range: [12000, 13000]
+Expected amounts: A=1000000, B=500000
+Min amounts (1% slippage): A=990000, B=495000
+Building atomic PTB with all operations...
+Step 1: Remove liquidity
+Step 2: Collect fees
+Step 3: Merge coins
+Step 4: Close old position
+Step 5: Swap to optimal ratio (if needed)
+Step 6: Open new position
+Step 7: Add liquidity to new position
+Step 8: Transfer new position to sender
+Executing atomic PTB...
+Rebalance successful! Digest: 0x123...
+=== Atomic PTB Rebalance Complete ===
+```
+
+## Troubleshooting
+
+### "Gas price too high"
+- Wait for lower gas prices
+- Increase `MAX_GAS_PRICE` in config
+
+### "Slippage too high"
+- Price is moving too fast
+- Increase `MAX_SLIPPAGE_PERCENT` (carefully)
+- Wait for calmer market conditions
+
+### "Tick spacing validation failed"
+- Bug in range calculation
+- Report issue with pool details
+
+## Documentation
+
+- **FAILURE_SCENARIOS.md** - Analysis of failure cases and why PTB is safe
+- **ATOMIC_REBALANCING_DESIGN.md** - Complete technical design
+- **STRUCTURAL_REVIEW.md** - Why previous implementation was removed
+- **SUMMARY.md** - Project overview
+
+## Safety First
+
+**Start with monitoring mode** to understand how the bot works before enabling automated rebalancing.
+
+**Automated rebalancing** executes real transactions with real funds. Only enable after:
+1. Understanding the code
+2. Testing on testnet (if available)
+3. Monitoring mode works correctly
+4. Comfortable with gas costs
+5. Understanding MEV risks
+
+## License
+
+ISC

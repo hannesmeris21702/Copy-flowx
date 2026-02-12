@@ -1,274 +1,140 @@
-import BN from "bn.js";
-import Decimal from "decimal.js";
+const Q64 = BigInt(2) ** BigInt(64);
+const Q96 = BigInt(2) ** BigInt(96);
 
-/**
- * TickMath utility for converting between ticks and sqrtPriceX64
- * Based on CLMM math: price = 1.0001^tick
- * sqrtPriceX64 = sqrt(price) * 2^64
- */
-
-const Q64 = new BN(2).pow(new BN(64));
-const Q128 = new BN(2).pow(new BN(128));
+// Tick math constants (same as Uniswap V3 / Cetus)
 const MIN_TICK = -443636;
 const MAX_TICK = 443636;
 
-/**
- * Convert tick index to sqrtPriceX64
- * @param tick - Tick index
- * @returns sqrtPriceX64 as BN
- */
-export function tickIndexToSqrtPriceX64(tick: number): BN {
+export function tickToSqrtPrice(tick: number): bigint {
   if (tick < MIN_TICK || tick > MAX_TICK) {
-    throw new Error(`Tick ${tick} is out of bounds [${MIN_TICK}, ${MAX_TICK}]`);
+    throw new Error(`Tick ${tick} out of bounds [${MIN_TICK}, ${MAX_TICK}]`);
   }
-
-  // Calculate price = 1.0001^tick
-  const price = new Decimal(1.0001).pow(tick);
   
-  // Calculate sqrt(price)
-  const sqrtPrice = price.sqrt();
+  const absTick = Math.abs(tick);
   
-  // Multiply by 2^64
-  const sqrtPriceX64 = sqrtPrice.mul(new Decimal(2).pow(64));
+  let ratio = absTick & 0x1 ? BigInt('0xfffcb933bd6fad37aa2d162d1a594001') : Q96;
   
-  // Convert to BN
-  return new BN(sqrtPriceX64.toFixed(0));
+  if (absTick & 0x2) ratio = (ratio * BigInt('0xfff97272373d413259a46990580e213a')) / Q96;
+  if (absTick & 0x4) ratio = (ratio * BigInt('0xfff2e50f5f656932ef12357cf3c7fdcc')) / Q96;
+  if (absTick & 0x8) ratio = (ratio * BigInt('0xffe5caca7e10e4e61c3624eaa0941cd0')) / Q96;
+  if (absTick & 0x10) ratio = (ratio * BigInt('0xffcb9843d60f6159c9db58835c926644')) / Q96;
+  if (absTick & 0x20) ratio = (ratio * BigInt('0xff973b41fa98c081472e6896dfb254c0')) / Q96;
+  if (absTick & 0x40) ratio = (ratio * BigInt('0xff2ea16466c96a3843ec78b326b52861')) / Q96;
+  if (absTick & 0x80) ratio = (ratio * BigInt('0xfe5dee046a99a2a811c461f1969c3053')) / Q96;
+  if (absTick & 0x100) ratio = (ratio * BigInt('0xfcbe86c7900a88aedcffc83b479aa3a4')) / Q96;
+  if (absTick & 0x200) ratio = (ratio * BigInt('0xf987a7253ac413176f2b074cf7815e54')) / Q96;
+  if (absTick & 0x400) ratio = (ratio * BigInt('0xf3392b0822b70005940c7a398e4b70f3')) / Q96;
+  if (absTick & 0x800) ratio = (ratio * BigInt('0xe7159475a2c29b7443b29c7fa6e889d9')) / Q96;
+  if (absTick & 0x1000) ratio = (ratio * BigInt('0xd097f3bdfd2022b8845ad8f792aa5825')) / Q96;
+  if (absTick & 0x2000) ratio = (ratio * BigInt('0xa9f746462d870fdf8a65dc1f90e061e5')) / Q96;
+  if (absTick & 0x4000) ratio = (ratio * BigInt('0x70d869a156d2a1b890bb3df62baf32f7')) / Q96;
+  if (absTick & 0x8000) ratio = (ratio * BigInt('0x31be135f97d08fd981231505542fcfa6')) / Q96;
+  if (absTick & 0x10000) ratio = (ratio * BigInt('0x9aa508b5b7a84e1c677de54f3e99bc9')) / Q96;
+  if (absTick & 0x20000) ratio = (ratio * BigInt('0x5d6af8dedb81196699c329225ee604')) / Q96;
+  if (absTick & 0x40000) ratio = (ratio * BigInt('0x2216e584f5fa1ea926041bedfe98')) / Q96;
+  if (absTick & 0x80000) ratio = (ratio * BigInt('0x48a170391f7dc42444e8fa2')) / Q96;
+  
+  if (tick > 0) ratio = ((BigInt(2) ** BigInt(192)) - BigInt(1)) / ratio;
+  
+  return ratio;
 }
 
-/**
- * Convert sqrtPriceX64 to tick index
- * @param sqrtPriceX64 - sqrtPriceX64 as BN
- * @returns Approximate tick index
- */
-export function sqrtPriceX64ToTickIndex(sqrtPriceX64: BN): number {
-  // Divide by 2^64 to get sqrtPrice
-  const sqrtPriceDecimal = new Decimal(sqrtPriceX64.toString()).div(
-    new Decimal(2).pow(64)
-  );
-  
-  // Square to get price
-  const price = sqrtPriceDecimal.pow(2);
-  
-  // Calculate tick = log(price) / log(1.0001)
-  const tick = price.log(1.0001);
-  
-  // Round to nearest integer
-  return Math.round(tick.toNumber());
-}
-
-/**
- * Convert sqrtPriceX64 to human-readable price
- * @param sqrtPriceX64 - sqrtPriceX64 as BN or string
- * @param decimalsA - Decimals of token A
- * @param decimalsB - Decimals of token B
- * @returns Price as Decimal
- */
-export function sqrtPriceX64ToPrice(
-  sqrtPriceX64: BN | string,
-  decimalsA: number,
-  decimalsB: number
-): Decimal {
-  const sqrtPriceBN = typeof sqrtPriceX64 === "string" ? new BN(sqrtPriceX64) : sqrtPriceX64;
-  
-  // Divide by 2^64 to get sqrtPrice
-  const sqrtPrice = new Decimal(sqrtPriceBN.toString()).div(
-    new Decimal(2).pow(64)
-  );
-  
-  // Square to get price
-  const price = sqrtPrice.pow(2);
-  
-  // Adjust for decimals
-  const decimalAdjustment = new Decimal(10).pow(decimalsB - decimalsA);
-  
-  return price.mul(decimalAdjustment);
-}
-
-/**
- * Calculate token A amount for a given liquidity and price range
- * Formula: ΔA = L * (sqrtPriceB - sqrtPriceA) / (sqrtPriceA * sqrtPriceB)
- * 
- * @param sqrtPriceAX64 - Lower sqrt price (as BN)
- * @param sqrtPriceBX64 - Upper sqrt price (as BN)
- * @param liquidity - Liquidity amount (as BN)
- * @param roundUp - Whether to round up
- * @returns Amount of token A
- */
 export function getAmountAFromLiquidity(
-  sqrtPriceAX64: BN,
-  sqrtPriceBX64: BN,
-  liquidity: BN,
-  roundUp: boolean
-): BN {
-  if (sqrtPriceAX64.gt(sqrtPriceBX64)) {
-    [sqrtPriceAX64, sqrtPriceBX64] = [sqrtPriceBX64, sqrtPriceAX64];
+  sqrtPriceLower: bigint,
+  sqrtPriceUpper: bigint,
+  liquidity: bigint
+): bigint {
+  if (sqrtPriceLower > sqrtPriceUpper) {
+    [sqrtPriceLower, sqrtPriceUpper] = [sqrtPriceUpper, sqrtPriceLower];
   }
-
-  const numerator = liquidity.mul(sqrtPriceBX64.sub(sqrtPriceAX64)).mul(Q64);
-  const denominator = sqrtPriceBX64.mul(sqrtPriceAX64);
-
-  if (roundUp) {
-    return numerator.add(denominator).sub(new BN(1)).div(denominator);
-  } else {
-    return numerator.div(denominator);
+  
+  if (sqrtPriceLower === BigInt(0) || sqrtPriceUpper === BigInt(0)) {
+    throw new Error('Invalid sqrt price: cannot be zero');
   }
+  
+  const numerator = liquidity * (sqrtPriceUpper - sqrtPriceLower) * Q64;
+  const denominator = sqrtPriceLower * sqrtPriceUpper;
+  
+  return numerator / denominator;
 }
 
-/**
- * Calculate token B amount for a given liquidity and price range
- * Formula: ΔB = L * (sqrtPriceB - sqrtPriceA)
- * 
- * @param sqrtPriceAX64 - Lower sqrt price (as BN)
- * @param sqrtPriceBX64 - Upper sqrt price (as BN)
- * @param liquidity - Liquidity amount (as BN)
- * @param roundUp - Whether to round up
- * @returns Amount of token B
- */
 export function getAmountBFromLiquidity(
-  sqrtPriceAX64: BN,
-  sqrtPriceBX64: BN,
-  liquidity: BN,
-  roundUp: boolean
-): BN {
-  if (sqrtPriceAX64.gt(sqrtPriceBX64)) {
-    [sqrtPriceAX64, sqrtPriceBX64] = [sqrtPriceBX64, sqrtPriceAX64];
+  sqrtPriceLower: bigint,
+  sqrtPriceUpper: bigint,
+  liquidity: bigint
+): bigint {
+  if (sqrtPriceLower > sqrtPriceUpper) {
+    [sqrtPriceLower, sqrtPriceUpper] = [sqrtPriceUpper, sqrtPriceLower];
   }
-
-  const diff = sqrtPriceBX64.sub(sqrtPriceAX64);
-  const amount = liquidity.mul(diff).div(Q64);
-
-  if (roundUp) {
-    return amount.add(new BN(1));
-  } else {
-    return amount;
-  }
+  
+  return (liquidity * (sqrtPriceUpper - sqrtPriceLower)) / Q64;
 }
 
-/**
- * Get token amounts from liquidity for a position
- * @param sqrtPriceCurrentX64 - Current pool sqrt price
- * @param sqrtPriceLowerX64 - Position lower bound sqrt price
- * @param sqrtPriceUpperX64 - Position upper bound sqrt price
- * @param liquidity - Position liquidity
- * @param roundUp - Whether to round up
- * @returns Object with amountA and amountB
- */
-export function getAmountsFromLiquidity(
-  sqrtPriceCurrentX64: BN,
-  sqrtPriceLowerX64: BN,
-  sqrtPriceUpperX64: BN,
-  liquidity: BN,
-  roundUp: boolean
-): { amountA: BN; amountB: BN } {
-  let amountA = new BN(0);
-  let amountB = new BN(0);
-
-  if (sqrtPriceCurrentX64.lte(sqrtPriceLowerX64)) {
-    // Current price is below the range - only token A
-    amountA = getAmountAFromLiquidity(sqrtPriceLowerX64, sqrtPriceUpperX64, liquidity, roundUp);
-  } else if (sqrtPriceCurrentX64.lt(sqrtPriceUpperX64)) {
-    // Current price is in range - both tokens
-    amountA = getAmountAFromLiquidity(sqrtPriceCurrentX64, sqrtPriceUpperX64, liquidity, roundUp);
-    amountB = getAmountBFromLiquidity(sqrtPriceLowerX64, sqrtPriceCurrentX64, liquidity, roundUp);
-  } else {
-    // Current price is above the range - only token B
-    amountB = getAmountBFromLiquidity(sqrtPriceLowerX64, sqrtPriceUpperX64, liquidity, roundUp);
+export function alignTickToSpacing(tick: number, tickSpacing: number): number {
+  if (tickSpacing <= 0) {
+    throw new Error('Tick spacing must be positive');
   }
-
-  return { amountA, amountB };
+  return Math.round(tick / tickSpacing) * tickSpacing;
 }
 
-/**
- * Calculate liquidity from token A amount
- * Formula: L = ΔA * sqrtPriceA * sqrtPriceB / (sqrtPriceB - sqrtPriceA)
- * 
- * @param sqrtPriceAX64 - Lower sqrt price
- * @param sqrtPriceBX64 - Upper sqrt price
- * @param amountA - Amount of token A
- * @returns Liquidity
- */
-export function getLiquidityFromAmountA(
-  sqrtPriceAX64: BN,
-  sqrtPriceBX64: BN,
-  amountA: BN
-): BN {
-  if (sqrtPriceAX64.gt(sqrtPriceBX64)) {
-    [sqrtPriceAX64, sqrtPriceBX64] = [sqrtPriceBX64, sqrtPriceAX64];
+export function calculateTickRange(
+  currentTick: number,
+  rangeWidthPercent: number,
+  tickSpacing: number
+): { tickLower: number; tickUpper: number } {
+  if (rangeWidthPercent <= 0 || rangeWidthPercent > 100) {
+    throw new Error('Range width percent must be between 0 and 100');
   }
-
-  const numerator = amountA.mul(sqrtPriceAX64).mul(sqrtPriceBX64).div(Q64);
-  const denominator = sqrtPriceBX64.sub(sqrtPriceAX64);
-
-  return numerator.div(denominator);
+  
+  if (tickSpacing <= 0) {
+    throw new Error('Tick spacing must be positive');
+  }
+  
+  // Calculate tick range based on price percentage
+  // For a given percentage p, the tick difference is: log(1 + p/100) / log(1.0001)
+  const priceRatio = 1 + rangeWidthPercent / 100;
+  const tickDelta = Math.floor(Math.log(priceRatio) / Math.log(1.0001));
+  
+  const tickLower = alignTickToSpacing(
+    currentTick - Math.floor(tickDelta / 2),
+    tickSpacing
+  );
+  const tickUpper = alignTickToSpacing(
+    currentTick + Math.floor(tickDelta / 2),
+    tickSpacing
+  );
+  
+  // Validate bounds
+  if (tickLower < MIN_TICK || tickUpper > MAX_TICK) {
+    throw new Error(`Calculated tick range [${tickLower}, ${tickUpper}] exceeds bounds`);
+  }
+  
+  return { tickLower, tickUpper };
 }
 
-/**
- * Calculate liquidity from token B amount
- * Formula: L = ΔB / (sqrtPriceB - sqrtPriceA)
- * 
- * @param sqrtPriceAX64 - Lower sqrt price
- * @param sqrtPriceBX64 - Upper sqrt price
- * @param amountB - Amount of token B
- * @returns Liquidity
- */
-export function getLiquidityFromAmountB(
-  sqrtPriceAX64: BN,
-  sqrtPriceBX64: BN,
-  amountB: BN
-): BN {
-  if (sqrtPriceAX64.gt(sqrtPriceBX64)) {
-    [sqrtPriceAX64, sqrtPriceBX64] = [sqrtPriceBX64, sqrtPriceAX64];
-  }
-
-  const diff = sqrtPriceBX64.sub(sqrtPriceAX64);
-  return amountB.mul(Q64).div(diff);
+export function isTickInRange(
+  currentTick: number,
+  tickLower: number,
+  tickUpper: number
+): boolean {
+  return currentTick >= tickLower && currentTick <= tickUpper;
 }
 
-/**
- * Get liquidity from token amounts
- * @param sqrtPriceCurrentX64 - Current pool sqrt price
- * @param sqrtPriceLowerX64 - Position lower bound sqrt price
- * @param sqrtPriceUpperX64 - Position upper bound sqrt price
- * @param amountA - Amount of token A
- * @param amountB - Amount of token B
- * @returns Calculated liquidity
- */
-export function getLiquidityFromAmounts(
-  sqrtPriceCurrentX64: BN,
-  sqrtPriceLowerX64: BN,
-  sqrtPriceUpperX64: BN,
-  amountA: BN,
-  amountB: BN
-): BN {
-  let liquidity: BN;
-
-  if (sqrtPriceCurrentX64.lte(sqrtPriceLowerX64)) {
-    // Current price is below the range - use only token A
-    liquidity = getLiquidityFromAmountA(sqrtPriceLowerX64, sqrtPriceUpperX64, amountA);
-  } else if (sqrtPriceCurrentX64.lt(sqrtPriceUpperX64)) {
-    // Current price is in range - use both tokens, take minimum
-    const liquidityA = getLiquidityFromAmountA(sqrtPriceCurrentX64, sqrtPriceUpperX64, amountA);
-    const liquidityB = getLiquidityFromAmountB(sqrtPriceLowerX64, sqrtPriceCurrentX64, amountB);
-    liquidity = liquidityA.lt(liquidityB) ? liquidityA : liquidityB;
-  } else {
-    // Current price is above the range - use only token B
-    liquidity = getLiquidityFromAmountB(sqrtPriceLowerX64, sqrtPriceUpperX64, amountB);
+export function calculatePriceDeviation(
+  currentTick: number,
+  tickLower: number,
+  tickUpper: number
+): number {
+  if (currentTick >= tickLower && currentTick <= tickUpper) {
+    return 0;
   }
-
-  return liquidity;
+  
+  const rangeWidth = tickUpper - tickLower;
+  if (rangeWidth === 0) return 100;
+  
+  if (currentTick < tickLower) {
+    return ((tickLower - currentTick) / rangeWidth) * 100;
+  }
+  
+  return ((currentTick - tickUpper) / rangeWidth) * 100;
 }
-
-/**
- * ClmmTickMath namespace for compatibility with existing code
- */
-export const ClmmTickMath = {
-  tickIndexToSqrtPriceX64,
-  sqrtPriceX64ToTickIndex,
-  sqrtPriceX64ToPrice,
-  getAmountAFromLiquidity,
-  getAmountBFromLiquidity,
-  getAmountsFromLiquidity,
-  getLiquidityFromAmountA,
-  getLiquidityFromAmountB,
-  getLiquidityFromAmounts,
-};

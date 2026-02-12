@@ -1,84 +1,72 @@
-import dotenv from "dotenv";
+import dotenv from 'dotenv';
 dotenv.config();
 
-import { BPS, Percent, Protocol } from "./utils/sdkTypes";
-import { Worker } from "./Worker";
-import { removeTrailingZeros } from "./utils/stringUtils";
-import { ClmmProtocol } from "./constants";
+import { loadConfig, validateConfig } from './config';
+import { logger } from './utils/logger';
+import { MonitoringBot } from './services/bot';
+import { RebalancingBot } from './services/rebalancingBot';
+import fs from 'fs';
+import path from 'path';
 
-// Validate required environment variables
-if (!process.env.PROTOCOL) {
-  throw new Error("PROTOCOL environment variable is required");
+const logsDir = path.join(__dirname, '../logs');
+if (!fs.existsSync(logsDir)) {
+  fs.mkdirSync(logsDir, { recursive: true });
 }
 
-if (!process.env.TARGET_POOL) {
-  throw new Error("TARGET_POOL environment variable is required");
+async function main(): Promise<void> {
+  try {
+    // Check if rebalancing mode is enabled via environment variable
+    const enableRebalancing = process.env.ENABLE_REBALANCING === 'true';
+    
+    if (enableRebalancing) {
+      logger.info('=== Cetus CLMM Atomic Rebalancing Bot ===');
+      logger.warn('⚠️  AUTOMATED REBALANCING ENABLED');
+      logger.warn('⚠️  This bot will execute transactions automatically');
+    } else {
+      logger.info('=== Cetus CLMM Position Monitor ===');
+      logger.info('NOTE: Monitoring only - no automated trading');
+      logger.info('Set ENABLE_REBALANCING=true to enable automated rebalancing');
+    }
+    
+    logger.info('Loading configuration...');
+    const config = loadConfig();
+    
+    logger.info('Validating configuration...');
+    validateConfig(config);
+    
+    logger.info('Configuration loaded successfully');
+    
+    const bot = enableRebalancing 
+      ? new RebalancingBot(config)
+      : new MonitoringBot(config);
+    
+    await bot.start();
+    
+    process.on('SIGINT', () => {
+      logger.info('Received SIGINT signal');
+      bot.stop();
+      process.exit(0);
+    });
+    
+    process.on('SIGTERM', () => {
+      logger.info('Received SIGTERM signal');
+      bot.stop();
+      process.exit(0);
+    });
+    
+    process.on('uncaughtException', (error: Error) => {
+      logger.error('Uncaught exception', error);
+      bot.stop();
+      process.exit(1);
+    });
+    
+    process.on('unhandledRejection', (reason: unknown) => {
+      logger.error('Unhandled rejection', { reason });
+    });
+  } catch (error) {
+    logger.error('Fatal error starting bot', error);
+    process.exit(1);
+  }
 }
 
-if (!process.env.PRIVATE_KEY) {
-  throw new Error("PRIVATE_KEY environment variable is required");
-}
-
-// Validate protocol value
-const protocol = process.env.PROTOCOL as ClmmProtocol;
-if (protocol !== Protocol.CETUS) {
-  throw new Error(`Unsupported protocol: ${protocol}. Only CETUS is supported.`);
-}
-
-const workerOptions = {
-  protocol,
-  poolId: process.env.TARGET_POOL,
-  bPricePercent: new Percent(Number(process.env.BPRICE_PERCENT), BPS),
-  tPricePercent: new Percent(Number(process.env.TPRICE_PERCENT), BPS),
-  slippageTolerance: new Percent(Number(process.env.SLIPPAGE_TOLERANCE), BPS),
-  priceImpactPercentThreshold: new Percent(
-    Number(process.env.PRICE_IMPACT_PERCENT_THRESHOLD),
-    BPS
-  ),
-  minZapAmount: {
-    amountX: Number(process.env.MIN_ZAP_AMOUNT_X),
-    amountY: Number(process.env.MIN_ZAP_AMOUNT_Y),
-  },
-  multiplier: Number(process.env.MULTIPLIER ?? 1),
-  rewardThresholdUsd: process.env.REWARD_THRESHOLD_USD
-    ? Number(process.env.REWARD_THRESHOLD_USD)
-    : undefined,
-  compoundRewardsScheduleMs: Number(process.env.COMPOUND_REWARDS_SCHEDULE_MS),
-  trackingVolumeAddress: process.env.TRACKING_VOLUME_ADDRESS,
-};
-const worker = new Worker(workerOptions, process.env.PRIVATE_KEY);
-
-console.log(
-  `Start rebalancing worker with config ${JSON.stringify({
-    ...workerOptions,
-    bPricePercent:
-      removeTrailingZeros(
-        workerOptions.bPricePercent.toFixed(4, {
-          decimalSeparator: ".",
-          groupSeparator: "",
-        })
-      ) + "%",
-    tPricePercent:
-      removeTrailingZeros(
-        workerOptions.tPricePercent.toFixed(4, {
-          decimalSeparator: ".",
-          groupSeparator: "",
-        })
-      ) + "%",
-    slippageTolerance:
-      removeTrailingZeros(
-        workerOptions.slippageTolerance.toFixed(2, {
-          decimalSeparator: ".",
-          groupSeparator: "",
-        })
-      ) + "%",
-    priceImpactPercentThreshold:
-      removeTrailingZeros(
-        workerOptions.priceImpactPercentThreshold.toFixed(2, {
-          decimalSeparator: ".",
-          groupSeparator: "",
-        })
-      ) + "%",
-  })} ...`
-);
-worker.start();
+main();

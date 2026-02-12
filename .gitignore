@@ -6,3 +6,9 @@ dist/
 
 # Ignore specific json files
 app.json
+# Logs
+logs/
+*.log
+
+# Environment
+.env
