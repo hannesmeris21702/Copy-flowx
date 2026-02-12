@@ -1,7 +1,7 @@
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
-import { nowInMilliseconds, Percent } from "./utils/sdkTypes";
+import { nowInMilliseconds, Percent, ZERO } from "./utils/sdkTypes";
 import BN from "bn.js";
 import invariant from "tiny-invariant";
 
@@ -12,7 +12,7 @@ import {
   Position,
 } from "./entities";
 import { jsonRpcProvider } from "./utils/jsonRpcProvider";
-import { closestActiveRange, isOutOfRange } from "./utils/poolHelper";
+import { closestActiveRange } from "./utils/poolHelper";
 import { PositionManager } from "./PositionManager";
 import { sleep } from "./utils/thread";
 import { getLogger } from "./utils/Logger";
@@ -180,8 +180,20 @@ export class Worker {
   }
 
   private async rebalanceIfNecessary() {
-    // Skip if no position
+    // =================================================================
+    // STEP 1: POSITION CHECK
+    // =================================================================
+    
+    // Skip if no position exists
     if (!this.position) {
+      this.logger.info("Rebalance: No position found, skipping");
+      return;
+    }
+
+    // Skip if liquidity is zero
+    const liquidityBN = new BN(this.position.liquidity);
+    if (liquidityBN.eq(ZERO)) {
+      this.logger.info("Rebalance: Position has zero liquidity, skipping");
       return;
     }
 
@@ -189,14 +201,51 @@ export class Worker {
     // Check for falsy values (0, undefined, null) or invalid range
     // Note: 0 indicates parsing failure in parseTickIndex(), so it's treated as invalid
     if (!this.position.tickLower || !this.position.tickUpper || this.position.tickLower >= this.position.tickUpper) {
-      this.logger.warn("Skipping rebalance due to invalid tick range");
+      this.logger.warn("Rebalance: Invalid tick range detected, skipping");
       return;
     }
 
     const pool = this.position.pool;
+    const currentTick = pool.tickCurrent;
+    const tickLower = this.position.tickLower;
+    const tickUpper = this.position.tickUpper;
+
+    this.logger.info(
+      `Rebalance Step 1: Position check - Position ID: ${this.position.id}, ` +
+      `tickLower: ${tickLower}, tickUpper: ${tickUpper}, ` +
+      `liquidity: ${this.position.liquidity}, poolId: ${pool.id}`
+    );
+
+    // Fetch current pool tick from on-chain pool state
+    this.logger.info(`Rebalance Step 1: Current pool tick: ${currentTick}`);
+
+    // Determine if position is in range
+    const isInRange = currentTick >= tickLower && currentTick <= tickUpper;
+    this.logger.info(`Rebalance Step 1: Position isInRange: ${isInRange}`);
+
+    // =================================================================
+    // SAFETY RULE: Never rebalance if already in range
+    // =================================================================
+    if (isInRange) {
+      this.logger.info("Rebalance: Position is in range, no rebalance needed");
+      return;
+    }
+
+    // =================================================================
+    // STEP 2: POSITION IS OUT OF RANGE - BEGIN REBALANCE
+    // =================================================================
+    this.logger.info("Rebalance Step 2: Position is OUT OF RANGE, starting rebalance process");
+
+    // =================================================================
+    // STEP 3: CALCULATE NEW ACTIVE RANGE
+    // =================================================================
+    this.logger.info("Rebalance Step 3: Calculating new active range");
+
+    // Use closestActiveRange which already uses config parameters (multiplier)
     const activeTicks = closestActiveRange(pool, this.multiplier);
-    
-    // Create price range with error handling
+    let [newLowerTick, newUpperTick] = activeTicks;
+
+    // Apply bPricePercent and tPricePercent adjustments
     let activePriceRange: PriceRange;
     try {
       activePriceRange = new PriceRange(
@@ -206,91 +255,104 @@ export class Worker {
         this.tPricePercent
       );
     } catch (error) {
-      this.logger.warn("Failed to create price range, skipping rebalance", error);
+      this.logger.warn("Rebalance: Failed to create price range, skipping rebalance", error);
       return;
     }
 
-    let [targetTickLower, targetTickUpper] = isOutOfRange(
-      this.position,
-      this.multiplier
-    )
-      ? [activeTicks[0], activeTicks[1]]
-      : [this.position.tickLower, this.position.tickUpper];
+    // Adjust range based on current price position
     const currentSqrtPriceX64 = new BN(pool.sqrtPriceX64);
     if (currentSqrtPriceX64.lt(activePriceRange.bPriceLower)) {
-      targetTickLower = activeTicks[0] - pool.tickSpacing;
-      targetTickUpper = activeTicks[1];
+      newLowerTick = activeTicks[0] - pool.tickSpacing;
+      newUpperTick = activeTicks[1];
     } else if (currentSqrtPriceX64.gt(activePriceRange.bPriceUpper)) {
-      targetTickLower = activeTicks[0];
-      targetTickUpper = activeTicks[1] + pool.tickSpacing;
+      newLowerTick = activeTicks[0];
+      newUpperTick = activeTicks[1] + pool.tickSpacing;
     } else if (
       currentSqrtPriceX64.gt(activePriceRange.tPriceLower) &&
       currentSqrtPriceX64.lt(activePriceRange.tPriceUpper)
     ) {
-      targetTickLower = activeTicks[0];
-      targetTickUpper = activeTicks[1];
+      newLowerTick = activeTicks[0];
+      newUpperTick = activeTicks[1];
+    }
+
+    // =================================================================
+    // SAFETY RULE: Validate new tick range
+    // =================================================================
+    if (newLowerTick >= newUpperTick) {
+      this.logger.error(
+        `Rebalance: Invalid new tick range calculated: ` +
+        `newLowerTick=${newLowerTick}, newUpperTick=${newUpperTick}`
+      );
+      return;
+    }
+
+    if (newLowerTick >= currentTick || newUpperTick <= currentTick) {
+      this.logger.error(
+        `Rebalance: New tick range does not contain current tick: ` +
+        `newLowerTick=${newLowerTick}, currentTick=${currentTick}, newUpperTick=${newUpperTick}`
+      );
+      return;
     }
 
     this.logger.info(
-      `Current pool state ${JSON.stringify({
-        currentTick: pool.tickCurrent,
-        currentPrice: pool.sqrtPriceX64,
-      })}, active price range [${activeTicks[0]},${
-        activeTicks[1]
-      }][${tickToPrice(
-        pool.coinX,
-        pool.coinY,
-        activeTicks[0]
-      ).asFraction.toFixed(4)}-${tickToPrice(
-        pool.coinX,
-        pool.coinY,
-        activeTicks[1]
-      ).asFraction.toFixed(
-        4
-      )}], target price range [${targetTickLower},${targetTickUpper}][${tickToPrice(
-        pool.coinX,
-        pool.coinY,
-        targetTickLower
-      ).asFraction.toFixed(4)}-${tickToPrice(
-        pool.coinX,
-        pool.coinY,
-        targetTickUpper
-      ).asFraction.toFixed(4)}]`
+      `Rebalance Step 3: New active range calculated - ` +
+      `newLowerTick: ${newLowerTick}, newUpperTick: ${newUpperTick}, ` +
+      `currentTick: ${currentTick}`
     );
 
-    if (
-      targetTickLower !== this.position.tickLower ||
-      targetTickUpper !== this.position.tickUpper
-    ) {
-      const positionThatWillBeRebalanced = new Position({
-        objectId: this.position.id,
-        owner: this.position.owner,
-        pool,
-        tickLower: this.position.tickLower,
-        tickUpper: this.position.tickUpper,
-        liquidity: this.position.liquidity,
-        coinsOwedX: this.position.coinsOwedX,
-        coinsOwedY: this.position.coinsOwedY,
-        feeGrowthInsideXLast: this.position.feeGrowthInsideXLast,
-        feeGrowthInsideYLast: this.position.feeGrowthInsideYLast,
-        rewardInfos: this.position.rewardInfos,
-      });
+    this.logger.info(
+      `Rebalance: Price range details - ` +
+      `Current tick: ${currentTick}, ` +
+      `Current price: ${pool.sqrtPriceX64}, ` +
+      `Active range: [${activeTicks[0]}, ${activeTicks[1]}] ` +
+      `[${tickToPrice(pool.coinX, pool.coinY, activeTicks[0]).asFraction.toFixed(4)}-` +
+      `${tickToPrice(pool.coinX, pool.coinY, activeTicks[1]).asFraction.toFixed(4)}], ` +
+      `Target range: [${newLowerTick}, ${newUpperTick}] ` +
+      `[${tickToPrice(pool.coinX, pool.coinY, newLowerTick).asFraction.toFixed(4)}-` +
+      `${tickToPrice(pool.coinX, pool.coinY, newUpperTick).asFraction.toFixed(4)}]`
+    );
 
-      const newPositionId = await this.executeRebalance(
-        positionThatWillBeRebalanced,
-        targetTickLower,
-        targetTickUpper
+    // =================================================================
+    // STEP 4-7: EXECUTE REBALANCE
+    // =================================================================
+    // The actual removal, collection, closing, swapping, and position creation
+    // is handled by executeRebalance which calls PositionManager.migrate
+    this.logger.info(
+      `Rebalance Step 4-7: Executing rebalance - ` +
+      `removing liquidity, collecting fees/rewards, closing position, ` +
+      `swapping if necessary, and creating new position`
+    );
+
+    const positionThatWillBeRebalanced = new Position({
+      objectId: this.position.id,
+      owner: this.position.owner,
+      pool,
+      tickLower: this.position.tickLower,
+      tickUpper: this.position.tickUpper,
+      liquidity: this.position.liquidity,
+      coinsOwedX: this.position.coinsOwedX,
+      coinsOwedY: this.position.coinsOwedY,
+      feeGrowthInsideXLast: this.position.feeGrowthInsideXLast,
+      feeGrowthInsideYLast: this.position.feeGrowthInsideYLast,
+      rewardInfos: this.position.rewardInfos,
+    });
+
+    const newPositionId = await this.executeRebalance(
+      positionThatWillBeRebalanced,
+      newLowerTick,
+      newUpperTick
+    );
+    this.lastCompoundRewardAt = nowInMilliseconds();
+
+    if (!!newPositionId) {
+      this.logger.info(`Rebalance: Success! New position created: ${newPositionId}`);
+      await sleep(5000);
+      this.position = await this.positionProvider.getPositionById(
+        newPositionId
       );
-      this.lastCompoundRewardAt = nowInMilliseconds();
-
-      if (!!newPositionId) {
-        await sleep(5000);
-        this.position = await this.positionProvider.getPositionById(
-          newPositionId
-        );
-      } else {
-        this.position = null;
-      }
+    } else {
+      this.logger.warn("Rebalance: Position creation failed, setting position to null");
+      this.position = null;
     }
   }
 
@@ -316,9 +378,23 @@ export class Worker {
     tickUpper: number
   ) {
     try {
+      this.logger.info(
+        `ExecuteRebalance: Starting migration for position ${position.id} ` +
+        `from [${position.tickLower}, ${position.tickUpper}] to [${tickLower}, ${tickUpper}]`
+      );
+
       const tx = new Transaction();
+      
+      this.logger.info(
+        `ExecuteRebalance: Calling PositionManager.migrate which will: ` +
+        `(1) Remove liquidity, (2) Collect fees/rewards, (3) Close position, ` +
+        `(4) Swap if necessary, (5) Create new position`
+      );
+      
       await this.positionManager.migrate(position, tickLower, tickUpper)(tx);
 
+      this.logger.info(`ExecuteRebalance: Signing and executing transaction...`);
+      
       const res = await jsonRpcProvider.signAndExecuteTransaction({
         transaction: tx,
         signer: this.signer,
@@ -327,6 +403,7 @@ export class Worker {
           showObjectChanges: true,
         },
       });
+      
       invariant(
         res.effects.status.status == "success",
         res.effects.status.error
@@ -338,14 +415,16 @@ export class Worker {
           obj.objectType ===
             MAPPING_POSITION_OBJECT_TYPE[(position.pool as Pool).protocol]
       )?.["objectId"];
+      
       this.logger.info(
-        `Rebalance position successful, price_range=[${tickLower},${tickUpper}], position_id=${createdPosition}, tx_digest=${res.digest}`
+        `ExecuteRebalance: SUCCESS! New position created with ID: ${createdPosition}, ` +
+        `tick range: [${tickLower}, ${tickUpper}], tx_digest: ${res.digest}`
       );
 
       return createdPosition;
     } catch (error) {
       this.logger.error(
-        `Error during rebalance position=${position.id}`,
+        `ExecuteRebalance: ERROR during rebalance of position ${position.id}`,
         error
       );
       throw error;

@@ -170,6 +170,15 @@ export class PositionManager {
   migrate =
     (position: Position, tickLower: number, tickUpper: number) =>
     async (tx: Transaction) => {
+      logger.info(
+        `=== MIGRATE: Starting rebalance process ===`
+      );
+      logger.info(
+        `Position ID: ${position.id}, ` +
+        `Old range: [${position.tickLower}, ${position.tickUpper}], ` +
+        `New range: [${tickLower}, ${tickUpper}]`
+      );
+
       const positionManager = createPositionManager(
         (position.pool as Pool).protocol
       );
@@ -179,11 +188,27 @@ export class PositionManager {
         position.getRewards(),
       ]);
 
+      logger.info(
+        `MIGRATE Step 1: Fee amounts - ` +
+        `X: ${feeAmounts.amountX.toString()}, Y: ${feeAmounts.amountY.toString()}`
+      );
+      logger.info(
+        `MIGRATE Step 1: Reward amounts - ` +
+        `${rewardAmounts.map((r, i) => `[${i}]: ${r.toString()}`).join(', ')}`
+      );
+
+      // Step A: Remove ALL liquidity from the position
+      logger.info(
+        `MIGRATE Step 2: Removing liquidity (${position.liquidity}) from position`
+      );
       const [removedX, removedY] = positionManager.decreaseLiquidity(position, {
         slippageTolerance: this.slippageTolerance,
         deadline: Number.MAX_SAFE_INTEGER,
       })(tx);
+      logger.info(`MIGRATE Step 2: Liquidity removed successfully`);
 
+      // Step B: Collect fees and rewards
+      logger.info(`MIGRATE Step 3: Collecting fees and rewards`);
       const poolTokenRewards = {
         amountX: new BN(0),
         amountY: new BN(0),
@@ -195,6 +220,10 @@ export class PositionManager {
       }[] = [];
       position.pool.poolRewards.forEach(async (rewardInfo, idx) => {
         if (rewardAmounts[idx].gt(new BN(0))) {
+          logger.info(
+            `MIGRATE Step 3: Collecting reward ${idx} ` +
+            `(${rewardInfo.coin.symbol}): ${rewardAmounts[idx].toString()}`
+          );
           const collectedReward = positionManager.collectReward(position, {
             rewardCoin: rewardInfo.coin,
           })(tx);
@@ -204,17 +233,20 @@ export class PositionManager {
               rewardAmounts[idx]
             );
             tx.mergeCoins(removedX, [collectedReward]);
+            logger.info(`MIGRATE Step 3: Merged reward into coinX`);
           } else if (rewardInfo.coin.equals(coinY)) {
             poolTokenRewards.amountY = poolTokenRewards.amountY.add(
               rewardAmounts[idx]
             );
             tx.mergeCoins(removedY, [collectedReward]);
+            logger.info(`MIGRATE Step 3: Merged reward into coinY`);
           } else {
             nonPoolTokenRewards.push({
               coin: rewardInfo.coin,
               object: collectedReward,
               amount: rewardAmounts[idx],
             });
+            logger.info(`MIGRATE Step 3: Saved non-pool reward for later transfer`);
           }
         }
       });
@@ -228,8 +260,19 @@ export class PositionManager {
         amountY: burnAmounts.amountY.add(poolTokenRewards.amountY),
       };
 
-      positionManager.closePosition(position)(tx);
+      logger.info(
+        `MIGRATE Step 3: Total amounts after collection - ` +
+        `X: ${expectedMintAmounts.amountX.toString()}, ` +
+        `Y: ${expectedMintAmounts.amountY.toString()}`
+      );
 
+      // Step C: Close the old position
+      logger.info(`MIGRATE Step 4: Closing old position ${position.id}`);
+      positionManager.closePosition(position)(tx);
+      logger.info(`MIGRATE Step 4: Old position closed`);
+
+      // Calculate new position parameters
+      logger.info(`MIGRATE Step 5: Calculating new position parameters`);
       let positionThatWillBeCreated = Position.fromAmounts({
         owner: position.owner,
         pool: position.pool,
@@ -247,8 +290,86 @@ export class PositionManager {
         positionThatWillBeCreated.mintAmounts.amountY
       );
 
+      logger.info(
+        `MIGRATE Step 5: Remaining tokens after initial calculation - ` +
+        `X: ${remainingX.toString()}, Y: ${remainingY.toString()}`
+      );
+
       //Only one of the two assets, X or Y, is redundant when liquidity is added.
+      // Step D: Swap if necessary to balance tokens
       if (remainingX.gt(this.minZapAmounts.amountX)) {
+        logger.info(
+          `MIGRATE Step 6: Need to swap excess X (${remainingX.toString()}) ` +
+          `to balance tokens for new position`
+        );
+        
+        const totalConvertedAmount = (
+          await Promise.all(
+            nonPoolTokenRewards.map(async (reward) => {
+              const rewardExceededThreshold =
+                await this.doesRewardExceedValueThreshold(
+                  reward.coin.coinType,
+                  reward.amount
+                );
+              if (!rewardExceededThreshold) {
+                logger.info(
+                  `MIGRATE Step 6: Reward ${reward.coin.symbol} ` +
+                  `below threshold, skipping swap`
+                );
+                return new BN(0);
+              }
+
+              logger.info(
+                `MIGRATE Step 6: Converting reward ${reward.coin.symbol} ` +
+                `(${reward.amount.toString()}) to coinX`
+              );
+              return this.swapPositionRewardToPoolToken(
+                position,
+                { coin: coinX, object: removedX as any },
+                {
+                  coin: reward.coin,
+                  object: tx.splitCoins(reward.object, [
+                    reward.amount.toString(),
+                  ]),
+                },
+                reward.amount
+              )(tx);
+            })
+          )
+        ).reduce(
+          (acc, convertedAmount) => acc.add(new BN(convertedAmount)),
+          new BN(0)
+        );
+
+        logger.info(
+          `MIGRATE Step 6: Executing zap swap from X to Y, ` +
+          `amount: ${remainingX.add(totalConvertedAmount).toString()}`
+        );
+        
+        const { zapAmount, amountOut } = await this.zap(
+          positionThatWillBeCreated,
+          { coin: coinX, object: removedX as any },
+          { coin: coinY, object: removedY as any },
+          remainingX.add(totalConvertedAmount)
+        )(tx);
+
+        expectedMintAmounts.amountX = expectedMintAmounts.amountX
+          .add(totalConvertedAmount)
+          .sub(zapAmount);
+        expectedMintAmounts.amountY = expectedMintAmounts.amountY.add(
+          new BN(amountOut)
+        );
+        
+        logger.info(
+          `MIGRATE Step 6: Swap completed - ` +
+          `zapAmount: ${zapAmount.toString()}, amountOut: ${amountOut.toString()}`
+        );
+      } else if (remainingY.gt(this.minZapAmounts.amountY)) {
+        logger.info(
+          `MIGRATE Step 6: Need to swap excess Y (${remainingY.toString()}) ` +
+          `to balance tokens for new position`
+        );
+        
         const totalConvertedAmount = (
           await Promise.all(
             nonPoolTokenRewards.map(async (reward) => {
@@ -302,9 +423,17 @@ export class PositionManager {
                   reward.amount
                 );
               if (!rewardExceededThreshold) {
+                logger.info(
+                  `MIGRATE Step 6: Reward ${reward.coin.symbol} ` +
+                  `below threshold, skipping swap`
+                );
                 return new BN(0);
               }
 
+              logger.info(
+                `MIGRATE Step 6: Converting reward ${reward.coin.symbol} ` +
+                `(${reward.amount.toString()}) to coinY`
+              );
               return this.swapPositionRewardToPoolToken(
                 position,
                 { coin: coinY, object: removedY as any },
@@ -323,6 +452,11 @@ export class PositionManager {
           new BN(0)
         );
 
+        logger.info(
+          `MIGRATE Step 6: Executing zap swap from Y to X, ` +
+          `amount: ${remainingY.add(totalConvertedAmount).toString()}`
+        );
+
         const { zapAmount, amountOut } = await this.zap(
           positionThatWillBeCreated,
           { coin: coinY, object: removedY as any },
@@ -336,8 +470,24 @@ export class PositionManager {
         expectedMintAmounts.amountX = expectedMintAmounts.amountX.add(
           new BN(amountOut)
         );
+
+        logger.info(
+          `MIGRATE Step 6: Swap completed - ` +
+          `zapAmount: ${zapAmount.toString()}, amountOut: ${amountOut.toString()}`
+        );
+      } else {
+        logger.info(
+          `MIGRATE Step 6: No swap needed - remaining amounts are within tolerance`
+        );
       }
 
+      // Step E: Create new position
+      logger.info(
+        `MIGRATE Step 7: Creating new position with balanced amounts - ` +
+        `X: ${expectedMintAmounts.amountX.toString()}, ` +
+        `Y: ${expectedMintAmounts.amountY.toString()}`
+      );
+      
       positionThatWillBeCreated = Position.fromAmounts({
         owner: position.owner,
         pool: position.pool,
@@ -347,6 +497,12 @@ export class PositionManager {
         amountY: expectedMintAmounts.amountY,
         useFullPrecision: false,
       });
+
+      logger.info(
+        `MIGRATE Step 7: Opening new position and adding liquidity - ` +
+        `mintAmountX: ${positionThatWillBeCreated.mintAmounts.amountX.toString()}, ` +
+        `mintAmountY: ${positionThatWillBeCreated.mintAmounts.amountY.toString()}`
+      );
 
       const newPositionObj = positionManager.increaseLiquidity(
         positionThatWillBeCreated,
@@ -359,11 +515,18 @@ export class PositionManager {
         }
       )(tx) as TransactionResult;
 
+      logger.info(`MIGRATE Step 7: New position created successfully`);
+
       // Transfer new position object to the owner
       tx.transferObjects([newPositionObj], position.owner);
+      logger.info(`MIGRATE Step 7: New position transferred to owner`);
 
       // Transfer non-pool token rewards to the owner
       if (nonPoolTokenRewards.length > 0) {
+        logger.info(
+          `MIGRATE Step 8: Transferring ${nonPoolTokenRewards.length} ` +
+          `non-pool token rewards to owner`
+        );
         refundTokensIfNecessary(
           nonPoolTokenRewards.map((reward) => ({
             objectCoin: reward.object,
@@ -372,6 +535,8 @@ export class PositionManager {
           position.owner
         )(tx);
       }
+
+      logger.info(`=== MIGRATE: Rebalance process completed successfully ===`);
     };
 
   compound = (position: Position) => async (tx: Transaction) => {
