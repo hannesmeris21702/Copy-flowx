@@ -5,37 +5,10 @@ Fixed `SecondaryIndexOutOfBounds result_idx:0 secondary_idx:0 in command 4` erro
 
 ## Root Causes
 
-### 1. Incorrect close_position Function Signature
-The `pool_script::close_position` function was being called with 6 arguments (incorrectly copied from `remove_liquidity`), when it should only take 3 arguments.
+### 1. Command Ordering Fix (Primary Issue)
+The main issue was improper command ordering where zero-balance coins were being created between moveCall operations, disrupting command index tracking.
 
-**Incorrect (Before)**:
-```typescript
-ptb.moveCall({
-  target: `${packageId}::pool_script::close_position`,
-  typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-  arguments: [
-    ptb.object(globalConfigId),
-    ptb.object(pool.id),
-    ptb.object(position.id),
-    ptb.pure.u64(minAmountA.toString()),     // ❌ Not needed
-    ptb.pure.u64(minAmountB.toString()),     // ❌ Not needed
-    ptb.object(SUI_CLOCK_OBJECT_ID),         // ❌ Not needed
-  ],
-});
-```
-
-**Correct (After)**:
-```typescript
-ptb.moveCall({
-  target: `${packageId}::pool_script::close_position`,
-  typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-  arguments: [
-    ptb.object(globalConfigId),  // ✅ Config
-    ptb.object(pool.id),         // ✅ Pool
-    ptb.object(position.id),     // ✅ Position
-  ],
-});
-```
+**Note on close_position signature**: The correct signature requires 6 arguments matching the Cetus SDK. See MOVE_FUNCTION_FIX_SUMMARY.md for the correct close_position signature with min_amount_a, min_amount_b, and clock parameters.
 
 ### 2. Suboptimal Command Ordering
 Zero-balance coins created by `coinWithBalance` were being inserted between moveCall operations, which disrupted the command index tracking and caused SecondaryIndexOutOfBounds errors when trying to reference previous moveCall results.
@@ -79,21 +52,10 @@ logger.info('  ✓ Zero coins created');
 
 **Impact**: Creates commands 0-1 before any moveCall operations, ensuring consistent command indexing.
 
-#### Change 2: Fix close_position Signature (Lines 193-200)
-```typescript
-ptb.moveCall({
-  target: `${packageId}::pool_script::close_position`,
-  typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-  arguments: [
-    ptb.object(globalConfigId),
-    ptb.object(pool.id),
-    ptb.object(position.id),
-    // Removed: minAmountA, minAmountB, clock
-  ],
-});
-```
+#### Change 2: Command Ordering (Lines 138-143)
+Zero coin creation was moved to the beginning of PTB construction for proper command indexing.
 
-**Impact**: Matches the actual Cetus CLMM Move function signature, preventing transaction build failures.
+**Note**: For the correct close_position signature with 6 arguments (including min_amount_a, min_amount_b, and clock), see MOVE_FUNCTION_FIX_SUMMARY.md.
 
 #### Change 3: Add PTB Command Validation (Lines 268-275)
 ```typescript
@@ -211,10 +173,11 @@ PTB command structure logging can be expensive in production. Use debug level to
 
 ## Conclusion
 
-This fix addresses the core PTB command indexing issue by:
-1. ✅ Correcting Move function signatures
-2. ✅ Optimizing command ordering
-3. ✅ Adding debugging capabilities
-4. ✅ Following Sui SDK best practices
+This document primarily addresses the PTB command indexing issue by:
+1. ✅ Optimizing command ordering (zero coins created first)
+2. ✅ Adding debugging capabilities
+3. ✅ Following Sui SDK best practices
+
+**Note**: For complete Move function signature information, including the correct close_position signature with 6 arguments, refer to MOVE_FUNCTION_FIX_SUMMARY.md.
 
 The changes are minimal, focused, and maintain backward compatibility while fixing the SecondaryIndexOutOfBounds error.
