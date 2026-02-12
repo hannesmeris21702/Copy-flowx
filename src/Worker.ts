@@ -51,7 +51,7 @@ export class Worker {
   private txExecutor: CachingSuiTransactionExecutor;
   private logger = getLogger(module);
 
-  private position!: Position;
+  private position: Position | null = null;
   private positionProvider: IPositionProvider;
 
   constructor(options: WorkerOptions, privateKey: string) {
@@ -133,6 +133,13 @@ export class Worker {
 
   private async doProcess() {
     await this.synchronize();
+    
+    // Skip processing if no valid position
+    if (!this.position) {
+      this.logger.info("No valid active position found");
+      return;
+    }
+    
     this.logger.info(
       `Start tracking position ${JSON.stringify({
         id: this.position.id,
@@ -160,6 +167,11 @@ export class Worker {
         this.signer.toSuiAddress(),
         this.poolId
       );
+      
+      // Log if no valid position found
+      if (!this.position) {
+        this.logger.info("No valid active position found");
+      }
     } else {
       this.position = await this.positionProvider.getPositionById(
         this.position.id
@@ -168,14 +180,33 @@ export class Worker {
   }
 
   private async rebalanceIfNecessary() {
+    // Skip if no position
+    if (!this.position) {
+      return;
+    }
+
+    // Validate position tick range before proceeding
+    if (!this.position.tickLower || !this.position.tickUpper || this.position.tickLower >= this.position.tickUpper) {
+      this.logger.warn("Skipping rebalance due to invalid tick range");
+      return;
+    }
+
     const pool = this.position.pool;
     const activeTicks = closestActiveRange(pool, this.multiplier);
-    const activePriceRange = new PriceRange(
-      activeTicks[0],
-      activeTicks[1],
-      this.bPricePercent,
-      this.tPricePercent
-    );
+    
+    // Create price range with error handling
+    let activePriceRange: PriceRange;
+    try {
+      activePriceRange = new PriceRange(
+        activeTicks[0],
+        activeTicks[1],
+        this.bPricePercent,
+        this.tPricePercent
+      );
+    } catch (error) {
+      this.logger.warn("Failed to create price range, skipping rebalance", error);
+      return;
+    }
 
     let [targetTickLower, targetTickUpper] = isOutOfRange(
       this.position,
@@ -256,12 +287,17 @@ export class Worker {
           newPositionId
         );
       } else {
-        delete this.position;
+        this.position = null;
       }
     }
   }
 
   private async compoundIfNecessary() {
+    // Skip if no position
+    if (!this.position) {
+      return;
+    }
+    
     const elapsedTimeMs = nowInMilliseconds() - this.lastCompoundRewardAt;
     if (
       !isNaN(this.compoundRewardsScheduleMs) &&
