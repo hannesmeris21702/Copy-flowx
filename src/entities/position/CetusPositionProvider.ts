@@ -43,9 +43,9 @@ export class CetusPositionProvider implements IPositionProvider {
    * Gets the largest position owned by an address for a specific pool
    * @param ownerAddress - The Sui address of the position owner
    * @param poolId - The pool ID to filter positions
-   * @returns The position with the most liquidity
+   * @returns The position with the most liquidity, or null if no valid position found
    */
-  async getLargestPosition(ownerAddress: string, poolId: string): Promise<Position> {
+  async getLargestPosition(ownerAddress: string, poolId: string): Promise<Position | null> {
     // Query all positions owned by the address
     const positionType = MAPPING_POSITION_OBJECT_TYPE[Protocol.CETUS];
     if (!positionType) {
@@ -86,7 +86,8 @@ export class CetusPositionProvider implements IPositionProvider {
     }
 
     if (positions.length === 0) {
-      throw new Error(`No positions found for pool ${poolId} and owner ${ownerAddress}`);
+      console.warn(`No positions found for pool ${poolId} and owner ${ownerAddress}`);
+      return null;
     }
 
     // Find the position with the most liquidity
@@ -99,6 +100,15 @@ export class CetusPositionProvider implements IPositionProvider {
         maxLiquidity = liquidity;
         largestPosition = positions[i];
       }
+    }
+
+    // Validate tick range before returning
+    // Per requirements: positions with tickLower === 0 OR tickUpper === 0 are invalid
+    // Note: parseTickIndex() returns 0 as fallback when it can't parse tick data,
+    // so 0 indicates invalid/missing tick data in this context
+    if (largestPosition.tickLower === 0 || largestPosition.tickUpper === 0) {
+      console.warn("Invalid position ticks detected");
+      return null;
     }
 
     return largestPosition;
