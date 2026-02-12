@@ -142,3 +142,27 @@ src/
 ## License
 
 ISC
+
+## Failure Scenarios & Atomic Design
+
+This tool is monitoring-only by design. For documentation on why automated rebalancing was removed and how it could be implemented safely, see:
+
+- **[FAILURE_SCENARIOS.md](FAILURE_SCENARIOS.md)** - Comprehensive analysis of all failure cases (swap fails, partial execution, gas spikes, price movement) and why non-atomic operations are unsafe
+- **[ATOMIC_REBALANCING_DESIGN.md](ATOMIC_REBALANCING_DESIGN.md)** - Complete design for safe implementation using Sui's Programmable Transaction Blocks (PTB)
+
+### Key Insights
+
+**Problem**: Multi-transaction rebalancing has inherent risks:
+- Swap can fail after liquidity removed (stuck with no position)
+- Gas can spike mid-execution (partial completion)
+- Price can move between operations (stale calculations)
+- MEV attacks can extract value (front-running/sandwiching)
+
+**Solution**: Atomic PTB execution:
+- All operations in single transaction
+- All succeed or all fail (no partial state)
+- Automatic rollback on failure
+- Single gas estimation
+- MEV resistant
+
+**Status**: Design complete, implementation requires extensive testing, coin handling logic, and security audit.
