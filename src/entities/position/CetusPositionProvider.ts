@@ -5,6 +5,9 @@ import { jsonRpcProvider } from "../../utils/jsonRpcProvider";
 import { CetusPoolProvider } from "../pool/CetusPoolProvider";
 import { MAPPING_POSITION_OBJECT_TYPE } from "../../constants";
 import BN from "bn.js";
+import { getLogger } from "../../utils/Logger";
+
+const logger = getLogger(module);
 
 /**
  * CetusPositionProvider fetches position data from Cetus CLMM protocol
@@ -46,13 +49,92 @@ export class CetusPositionProvider implements IPositionProvider {
    * @returns The position with the most liquidity, or null if no valid position found
    */
   async getLargestPosition(ownerAddress: string, poolId: string): Promise<Position | null> {
-    // Query all positions owned by the address
+    logger.info(`=== FETCHING POSITIONS FOR DIAGNOSTICS ===`);
+    logger.info(`Owner: ${ownerAddress}`);
+    logger.info(`Target Pool ID: ${poolId}`);
+
+    // Step 1: Fetch ALL owned objects without type filtering
+    logger.info(`Fetching ALL owned objects (no type filter)...`);
+    const allOwnedObjects = await jsonRpcProvider.getOwnedObjects({
+      owner: ownerAddress,
+      options: {
+        showType: true,
+        showContent: true,
+        showOwner: true,
+      },
+    });
+
+    logger.info(`Total objects owned: ${allOwnedObjects.data?.length || 0}`);
+
+    // Step 2: Log EVERY object
+    if (allOwnedObjects.data && allOwnedObjects.data.length > 0) {
+      logger.info(`=== LOGGING ALL OWNED OBJECTS ===`);
+      
+      for (let i = 0; i < allOwnedObjects.data.length; i++) {
+        const obj = allOwnedObjects.data[i];
+        const data = obj.data;
+        
+        if (!data) {
+          logger.info(`Object ${i}: [NO DATA]`);
+          continue;
+        }
+
+        const objectId = data.objectId;
+        const type = data.type || "UNKNOWN";
+        const owner = data.owner;
+        
+        // Log basic info for all objects
+        logger.info(`\n--- Object ${i} ---`);
+        logger.info(`  objectId: ${objectId}`);
+        logger.info(`  type: ${type}`);
+        logger.info(`  owner: ${JSON.stringify(owner)}`);
+
+        // Check if type contains keywords
+        const typeLower = type.toLowerCase();
+        const containsCetus = typeLower.includes("cetus");
+        const containsPosition = typeLower.includes("position");
+        const containsClmm = typeLower.includes("clmm");
+
+        if (containsCetus || containsPosition || containsClmm) {
+          logger.info(`  ⚠️  TYPE CONTAINS KEYWORDS: cetus=${containsCetus}, position=${containsPosition}, clmm=${containsClmm}`);
+        }
+
+        // Try to extract pool and tick information
+        if (data.content && data.content.dataType === "moveObject") {
+          const fields = (data.content as any).fields;
+          if (fields) {
+            const pool = fields.pool || fields.pool_id;
+            const tickLower = fields.tick_lower_index || fields.tick_lower;
+            const tickUpper = fields.tick_upper_index || fields.tick_upper;
+            const liquidity = fields.liquidity;
+
+            logger.info(`  content.fields.pool: ${pool || "N/A"}`);
+            logger.info(`  content.fields.tick_lower_index: ${JSON.stringify(tickLower)}`);
+            logger.info(`  content.fields.tick_upper_index: ${JSON.stringify(tickUpper)}`);
+            logger.info(`  content.fields.liquidity: ${liquidity || "N/A"}`);
+
+            // Highlight if this matches our target pool
+            if (pool && pool === poolId) {
+              logger.info(`  ✅ MATCHES TARGET POOL ID!`);
+            }
+          }
+        }
+      }
+
+      logger.info(`\n=== END OF ALL OBJECTS LOG ===\n`);
+    } else {
+      logger.warn(`No objects found for owner: ${ownerAddress}`);
+    }
+
+    // Step 3: Now try with strict type filtering for comparison
     const positionType = MAPPING_POSITION_OBJECT_TYPE[Protocol.CETUS];
     if (!positionType) {
       throw new Error("Cetus position type not configured");
     }
 
-    // Get all objects owned by the address matching position type
+    logger.info(`=== NOW FETCHING WITH TYPE FILTER ===`);
+    logger.info(`Position type filter: ${positionType}`);
+
     const ownedObjects = await jsonRpcProvider.getOwnedObjects({
       owner: ownerAddress,
       filter: {
@@ -65,30 +147,40 @@ export class CetusPositionProvider implements IPositionProvider {
       },
     });
 
+    logger.info(`Objects matching type filter: ${ownedObjects.data?.length || 0}`);
+
     if (!ownedObjects.data || ownedObjects.data.length === 0) {
+      logger.error(`No positions found with type filter for owner: ${ownerAddress}`);
       throw new Error(`No positions found for owner: ${ownerAddress}`);
     }
 
-    // Parse all positions and filter by pool
+    // Step 4: Parse positions and filter by pool
+    logger.info(`=== PARSING POSITIONS ===`);
     const positions: Position[] = [];
     for (const obj of ownedObjects.data) {
       if (obj.data) {
         try {
           const position = await this.parsePositionObject(obj.data);
+          logger.info(`Parsed position ${obj.data.objectId}: pool=${position.pool.id}, liquidity=${position.liquidity}`);
+          
           if (position.pool.id === poolId) {
+            logger.info(`  ✅ Position matches target pool!`);
             positions.push(position);
+          } else {
+            logger.info(`  ❌ Position pool ${position.pool.id} does not match target ${poolId}`);
           }
         } catch (error) {
-          // Skip invalid positions
-          console.warn(`Failed to parse position ${obj.data.objectId}:`, error);
+          logger.warn(`Failed to parse position ${obj.data.objectId}:`, error);
         }
       }
     }
 
     if (positions.length === 0) {
-      console.warn(`No positions found for pool ${poolId} and owner ${ownerAddress}`);
+      logger.warn(`No positions found for pool ${poolId} and owner ${ownerAddress}`);
       return null;
     }
+
+    logger.info(`Found ${positions.length} position(s) for target pool`);
 
     // Find the position with the most liquidity
     let largestPosition = positions[0];
@@ -102,15 +194,18 @@ export class CetusPositionProvider implements IPositionProvider {
       }
     }
 
+    logger.info(`Largest position: ${largestPosition.id} with liquidity ${largestPosition.liquidity}`);
+
     // Validate tick range before returning
     // Per requirements: positions with tickLower === 0 OR tickUpper === 0 are invalid
     // Note: parseTickIndex() returns 0 as fallback when it can't parse tick data,
     // so 0 indicates invalid/missing tick data in this context
     if (largestPosition.tickLower === 0 || largestPosition.tickUpper === 0) {
-      console.warn("Invalid position ticks detected");
+      logger.warn("Invalid position ticks detected");
       return null;
     }
 
+    logger.info(`=== POSITION DETECTION COMPLETE ===`);
     return largestPosition;
   }
 
