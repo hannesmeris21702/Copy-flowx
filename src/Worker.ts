@@ -219,6 +219,8 @@ export class Worker {
     this.logger.info(`Rebalance Step 1: Current pool tick: ${currentTick}`);
 
     // Determine if position is in range
+    // Per problem statement: isInRange = currentTick >= tickLower && currentTick <= tickUpper
+    // Using inclusive boundaries on both ends as specified
     const isInRange = currentTick >= tickLower && currentTick <= tickUpper;
     this.logger.info(`Rebalance Step 1: Position isInRange: ${isInRange}`);
 
@@ -276,6 +278,8 @@ export class Worker {
 
     // =================================================================
     // SAFETY RULE: Validate new tick range
+    // Ensure new range is valid and contains current tick
+    // Using inclusive boundaries: newLowerTick <= currentTick <= newUpperTick
     // =================================================================
     if (newLowerTick >= newUpperTick) {
       this.logger.error(
