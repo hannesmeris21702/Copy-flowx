@@ -29,6 +29,40 @@ export function normalizeTypeArguments(typeArgs: string[]): string[] {
 }
 
 /**
+ * Validates that a type argument is properly normalized
+ * A normalized type argument should:
+ * - Be parseable by TypeTagSerializer
+ * - Have full-length addresses (64 hex chars)
+ * 
+ * @param typeArg Type argument string to validate
+ * @returns true if the type argument is properly normalized, false otherwise
+ */
+export function isTypeArgNormalized(typeArg: string): boolean {
+  try {
+    // Parse the type tag
+    const parsed = TypeTagSerializer.parseFromStr(typeArg, true);
+    const normalized = TypeTagSerializer.tagToString(parsed);
+    
+    // Check if parsing and re-serializing produces the same result
+    // This ensures the type arg is in canonical form
+    return normalized === typeArg;
+  } catch (error) {
+    // If parsing fails, it's not normalized
+    return false;
+  }
+}
+
+/**
+ * Validates that all type arguments in an array are properly normalized
+ * 
+ * @param typeArgs Array of type argument strings to validate
+ * @returns true if all type arguments are normalized, false otherwise
+ */
+export function validateTypeArguments(typeArgs: string[]): boolean {
+  return typeArgs.every(isTypeArgNormalized);
+}
+
+/**
  * Checks if an error is related to type argument parsing
  * 
  * Known error patterns from Sui blockchain:

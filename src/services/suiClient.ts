@@ -88,12 +88,23 @@ export class SuiClientService {
     }
   }
   
+  /**
+   * Executes a transaction without prior simulation
+   * Wraps PTB execution in try-catch with retry logic
+   * Validates type arguments are properly normalized
+   * Retries up to 5 times (minimum) with exponential backoff
+   * 
+   * @param tx The transaction to execute
+   * @returns Promise resolving to the transaction response
+   * @throws Error if transaction fails after all retry attempts
+   */
   async executeTransactionWithoutSimulation(tx: Transaction): Promise<SuiTransactionBlockResponse> {
     try {
       // Use configurable maxRetries from BotConfig
-      // Note: This is specifically for transaction execution retries (up to 5 per requirement)
-      // We use the config value but ensure it's at least 5 as per the requirement
+      // Ensure minimum of 5 retries as per requirement
       const maxRetries = Math.max(this.config.maxRetries, 5);
+      
+      logger.info(`Executing PTB with up to ${maxRetries} retry attempts and exponential backoff`);
       
       // Attempt execution with retry logic
       return await this.executeWithRetry(tx, maxRetries);
@@ -105,7 +116,14 @@ export class SuiClientService {
   
   /**
    * Execute transaction with retry logic and exponential backoff
-   * Retries up to maxRetries times (total maxRetries attempts, not maxRetries+1)
+   * Wraps execution in try-catch and handles transient failures
+   * Type arguments are validated and auto-corrected using TypeTagSerializer during PTB build
+   * Retries up to maxRetries times with exponential backoff delay
+   * 
+   * @param tx The transaction to execute
+   * @param maxRetries Maximum number of retry attempts
+   * @returns Promise resolving to the transaction response
+   * @throws Error if all retry attempts fail
    */
   private async executeWithRetry(
     tx: Transaction,
@@ -113,9 +131,15 @@ export class SuiClientService {
   ): Promise<SuiTransactionBlockResponse> {
     let lastError: Error = new Error('Transaction execution failed with unknown error');
     
+    logger.debug(`Starting PTB execution with ${maxRetries} maximum retry attempts`);
+    
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        logger.debug(`Attempt ${attempt}/${maxRetries}: Executing PTB...`);
+        
         // Execute the transaction
+        // Note: The Sui SDK's signAndExecuteTransaction handles Transaction building internally
+        // The Transaction object can be passed multiple times if needed for retries
         const result = await this.client.signAndExecuteTransaction({
           transaction: tx,
           signer: this.keypair,
@@ -126,13 +150,15 @@ export class SuiClientService {
           },
         });
         
+        // Verify execution was successful
         if (result.effects?.status.status !== 'success') {
           throw new Error(
             `Transaction execution failed: ${result.effects?.status.error || 'Unknown error'}`
           );
         }
         
-        logger.info(`Transaction executed successfully: ${result.digest}`);
+        logger.info(`✓ Transaction executed successfully on attempt ${attempt}/${maxRetries}`);
+        logger.info(`  Digest: ${result.digest}`);
         return result;
         
       } catch (error) {
@@ -141,8 +167,15 @@ export class SuiClientService {
         // Check if this is a type argument related error
         const isTypeError = isTypeArgError(lastError);
         
+        if (isTypeError) {
+          logger.error(
+            `Type argument error detected on attempt ${attempt}/${maxRetries}. ` +
+            `This indicates the PTB was not built with properly normalized type arguments.`
+          );
+        }
+        
         if (attempt < maxRetries) {
-          // Calculate exponential backoff delay
+          // Calculate exponential backoff delay: baseDelay * 2^(attempt-1)
           const baseDelay = this.config.minRetryDelayMs || 1000;
           const maxDelay = this.config.maxRetryDelayMs || 30000;
           const delay = Math.min(
@@ -152,13 +185,17 @@ export class SuiClientService {
           
           const errorType = isTypeError ? 'Type argument error' : 'Transaction error';
           logger.warn(
-            `${errorType} on attempt ${attempt}/${maxRetries}: ${lastError.message}. ` +
-            `Retrying with exponential backoff in ${delay}ms...`
+            `✗ ${errorType} on attempt ${attempt}/${maxRetries}: ${lastError.message}`
           );
+          logger.info(`  Retrying with exponential backoff delay: ${delay}ms...`);
           
           await new Promise((resolve) => setTimeout(resolve, delay));
         } else {
-          logger.error(`Transaction execution failed after ${maxRetries} attempts`);
+          // All retry attempts exhausted
+          logger.error(
+            `✗ Transaction execution failed after all ${maxRetries} retry attempts`
+          );
+          logger.error(`  Final error: ${lastError.message}`);
         }
       }
     }

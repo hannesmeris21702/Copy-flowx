@@ -4,7 +4,7 @@ import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
 import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
-import { normalizeTypeArguments } from '../utils/typeArgNormalizer';
+import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
 import {
   calculateTickRange,
   tickToSqrtPrice,
@@ -120,6 +120,15 @@ export class RebalanceService {
       pool.coinTypeB
     ]);
     logger.debug(`Type args normalized: A=${normalizedCoinTypeA}, B=${normalizedCoinTypeB}`);
+    
+    // Validate that type arguments are properly normalized
+    if (!validateTypeArguments([normalizedCoinTypeA, normalizedCoinTypeB])) {
+      throw new Error(
+        'Type argument normalization validation failed. ' +
+        'Type arguments could not be properly normalized using TypeTagSerializer.'
+      );
+    }
+    logger.debug('Type argument validation passed');
     
     // Step 1: Remove liquidity from old position
     // Use SDK builder pattern: pool_script::remove_liquidity
