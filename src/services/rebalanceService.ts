@@ -281,7 +281,8 @@ export class RebalanceService {
       packageId,
       globalConfigId,
       normalizedCoinTypeA,
-      normalizedCoinTypeB
+      normalizedCoinTypeB,
+      positionHasLiquidity  // Pass this to help determine if we have coins to swap
     );
     logger.info('  ✓ Final coins ready after swap: swappedCoinA, swappedCoinB');
     
@@ -362,7 +363,8 @@ export class RebalanceService {
     packageId: string,
     globalConfigId: string,
     normalizedCoinTypeA: string,
-    normalizedCoinTypeB: string
+    normalizedCoinTypeB: string,
+    positionHasLiquidity: boolean
   ): { coinA: TransactionObjectArgument; coinB: TransactionObjectArgument } {
     // Calculate optimal ratio for new range
     const sqrtPriceCurrent = BigInt(pool.currentSqrtPrice);
@@ -378,7 +380,17 @@ export class RebalanceService {
     
     if (sqrtPriceCurrent < sqrtPriceLower) {
       // Price below range - need token A, swap B to A
-      logger.info('  Price below new range - swapping ALL coinB to coinA');
+      logger.info('  Price below new range - need to swap coinB to coinA');
+      
+      // CHECK: Only perform swap if we have liquidity (and thus coins to swap)
+      // Per Cetus SDK pattern: don't call swap with zero amounts
+      // If position has no liquidity, we only have collect_fee coins (likely zero)
+      // In this case, skip the swap entirely to avoid referencing empty NestedResult
+      if (!positionHasLiquidity) {
+        logger.warn('  ⚠ Skipping swap: position has no liquidity, coinB likely has zero balance');
+        logger.info('  Using coinA as-is (no swap needed)');
+        return { coinA, coinB };
+      }
       
       const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
       
@@ -401,19 +413,23 @@ export class RebalanceService {
         ],
       });
       
-      // CHECK: Validate swap result before constructing MergeCoins
-      // swappedCoinA is NestedResult from swap moveCall
-      // Swap moveCall always returns tuple of coins, so this is safe to merge
-      // Check is for defensive programming and clarity
-      logger.debug('  CHECK: swappedCoinA from swap - always exists');
+      // Swap was performed: reference the NestedResult output and merge
+      logger.debug('  Merging swap output (swappedCoinA) into coinA');
       ptb.mergeCoins(coinA, [swappedCoinA]);
-      logger.info('  ✓ Swapped: coinB consumed, output merged into coinA');
+      logger.info('  ✓ Swapped: coinB to coinA, output merged');
       
       return { coinA, coinB: remainderCoinB };
       
     } else if (sqrtPriceCurrent > sqrtPriceUpper) {
       // Price above range - need token B, swap A to B
-      logger.info('  Price above new range - swapping ALL coinA to coinB');
+      logger.info('  Price above new range - need to swap coinA to coinB');
+      
+      // CHECK: Only perform swap if we have liquidity (and thus coins to swap)
+      if (!positionHasLiquidity) {
+        logger.warn('  ⚠ Skipping swap: position has no liquidity, coinA likely has zero balance');
+        logger.info('  Using coinB as-is (no swap needed)');
+        return { coinA, coinB };
+      }
       
       const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
       
@@ -436,19 +452,16 @@ export class RebalanceService {
         ],
       });
       
-      // CHECK: Validate swap result before constructing MergeCoins
-      // swappedCoinB is NestedResult from swap moveCall
-      // Swap moveCall always returns tuple of coins, so this is safe to merge
-      // Check is for defensive programming and clarity
-      logger.debug('  CHECK: swappedCoinB from swap - always exists');
+      // Swap was performed: reference the NestedResult output and merge
+      logger.debug('  Merging swap output (swappedCoinB) into coinB');
       ptb.mergeCoins(coinB, [swappedCoinB]);
-      logger.info('  ✓ Swapped: coinA consumed, output merged into coinB');
+      logger.info('  ✓ Swapped: coinA to coinB, output merged');
       
       return { coinA: remainderCoinA, coinB };
       
     } else {
       // Price in range - use both tokens as-is
-      logger.info('  Price in new range - using both coins as-is');
+      logger.info('  Price in new range - using both coins as-is (no swap needed)');
       return { coinA, coinB };
     }
   }
