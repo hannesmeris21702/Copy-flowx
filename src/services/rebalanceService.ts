@@ -142,8 +142,8 @@ export class RebalanceService {
     // Create zero coins upfront (before any moveCall operations)
     // This ensures proper command indexing for all subsequent operations
     logger.info('Creating zero-balance coins for transaction operations...');
-    const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0 })(ptb);
-    const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0 })(ptb);
+    const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
+    const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
     logger.info('  ✓ Zero coins created');
     
     // Step 1: Remove liquidity from old position
@@ -312,7 +312,7 @@ export class RebalanceService {
       // Price below range - need token A, swap B to A
       logger.info('  Price below new range - swapping ALL coinB to coinA');
       
-      const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0 })(ptb);
+      const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
       
       // Use SDK builder pattern: router::swap
       // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
@@ -342,7 +342,7 @@ export class RebalanceService {
       // Price above range - need token B, swap A to B
       logger.info('  Price above new range - swapping ALL coinA to coinB');
       
-      const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0 })(ptb);
+      const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
       
       // Use SDK builder pattern: router::swap
       // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
