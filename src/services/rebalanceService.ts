@@ -164,12 +164,13 @@ export class RebalanceService {
     // Step 1: Collect fees from old position FIRST (before closing)
     // This is the correct order per Cetus SDK pattern
     // Use SDK builder pattern: pool_script_v2::collect_fee
-    // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
+    // Returns tuple (Coin<A>, Coin<B>) - but may return empty [] if no fees
     // ============================================================================
-    logger.info('Step 1: Collect fees → returns [feeCoinA, feeCoinB]');
+    logger.info('Step 1: Collect fees → returns [feeCoinA, feeCoinB] or []');
     
-    // Command 2: collect_fee moveCall - Returns tuple [Coin<A>, Coin<B>]
-    // collectFeeResult[0] = feeCoinA, collectFeeResult[1] = feeCoinB
+    // Command 2: collect_fee moveCall - Returns tuple [Coin<A>, Coin<B>] or []
+    // NOTE: collectFeeResult is NOT destructured here to avoid SecondaryIndexOutOfBounds
+    // We'll conditionally reference indices only when we know outputs exist
     const collectFeeResult = ptb.moveCall({
       target: `${packageId}::pool_script_v2::collect_fee`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
@@ -181,8 +182,8 @@ export class RebalanceService {
         zeroCoinB,  // Using Command 1
       ],
     });
-    const [feeCoinA, feeCoinB] = collectFeeResult;  // Destructure: feeCoinA = result[2][0], feeCoinB = result[2][1]
-    logger.info('  ✓ Captured: feeCoinA (result[2][0]), feeCoinB (result[2][1])');
+    // DO NOT destructure here - deferred until we confirm outputs exist
+    logger.info('  ✓ collect_fee called (outputs will be conditionally merged)');
     
     // ============================================================================
     // Step 2: Close position (removes liquidity AND closes position NFT)
@@ -220,7 +221,7 @@ export class RebalanceService {
     // 
     // Official @mysten/sui Pattern:
     // 1. Create stable coin references that always exist (splitCoins from zero coins)
-    // 2. Merge collect_fee results into stable coins
+    // 2. Conditionally merge collect_fee results into stable coins (only if they exist)
     // 3. Use stable coins for downstream operations (swap, add_liquidity)
     // ============================================================================
     logger.info('Step 3: Merge collect_fee results - sole liquidity source');
@@ -231,21 +232,23 @@ export class RebalanceService {
     const [stableCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
     logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
     
-    // Merge collect_fee results into stable coins
+    // Conditionally merge collect_fee results into stable coins
     // Fee coins from collect_fee (result[2][0] and result[2][1]) are the sole liquidity source
-    // @copilot Fee coins always exist (collect_fee returns coins with zero balance if no fees)
-    PTBValidator.conditionalMerge(
-      ptb,
-      stableCoinA,
-      [feeCoinA],
-      'collect_fee coinA (result[2][0]) - SOLE LIQUIDITY SOURCE'
-    );
-    PTBValidator.conditionalMerge(
-      ptb,
-      stableCoinB,
-      [feeCoinB],
-      'collect_fee coinB (result[2][1]) - SOLE LIQUIDITY SOURCE'
-    );
+    // IMPORTANT: Only destructure and merge if position has liquidity (fees exist)
+    // This implements the deferred destructuring pattern to avoid SecondaryIndexOutOfBounds
+    logger.info(`  CHECK: collect_fee outputs (positionHasLiquidity=${positionHasLiquidity})...`);
+    if (positionHasLiquidity) {
+      // Only NOW create the NestedResult references when we know they exist
+      const [feeCoinA, feeCoinB] = collectFeeResult;  // ✅ Safe: outputs exist
+      logger.info('  ✓ Destructuring collect_fee results: feeCoinA (result[2][0]), feeCoinB (result[2][1])');
+      
+      ptb.mergeCoins(stableCoinA, [feeCoinA]);
+      ptb.mergeCoins(stableCoinB, [feeCoinB]);
+      logger.info('  ✓ Merged: collect_fee coins into stable coin references');
+    } else {
+      // DO NOT reference collectFeeResult[0] or [1] - they don't exist
+      logger.info('  ⊘ Skipped merge: position has no liquidity, fee coins do not exist');
+    }
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
     
