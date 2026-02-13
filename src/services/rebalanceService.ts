@@ -120,6 +120,11 @@ export class RebalanceService {
     logger.info('=== COIN OBJECT FLOW TRACE ===');
     logger.info('Order: create zero coins → collect_fee → close_position (removes liquidity) → merge → swap → open → add_liquidity → transfer');
     
+    // CHECK: Validate position liquidity before building PTB
+    // This allows us to determine if close_position will return coins
+    const positionHasLiquidity = BigInt(position.liquidity) > BigInt(0);
+    logger.info(`Position liquidity check: ${position.liquidity} (has liquidity: ${positionHasLiquidity})`);
+    
     // Get SDK configuration
     const packageId = sdk.sdkOptions.integrate.published_at;
     const globalConfigId = sdk.sdkOptions.clmm_pool.config!.global_config_id;
@@ -228,16 +233,13 @@ export class RebalanceService {
     // EXPLICIT CHECK: Validate NestedResult exists before constructing MergeCoins
     // 
     // For close_position NestedResult [3][0] and [3][1]:
-    // - At build time, we have TransactionObjectArgument references (removedCoinA/B)
-    // - At runtime, these may be empty if position has zero liquidity
-    // - Solution: Check if we should merge by verifying command result exists
+    // - At build time, we check if position has liquidity
+    // - If liquidity > 0, close_position will return coins → safe to merge
+    // - If liquidity == 0, close_position returns empty → SKIP merge
     // 
-    // Since PTBs don't support runtime conditionals in TypeScript, we use a pattern
-    // where we ONLY merge sources that are guaranteed to exist (collect_fee results),
-    // and we SKIP merging close_position results into stable references.
-    // 
-    // Instead, we'll use close_position results directly in the next operations,
-    // with the stable reference as fallback if close_position returns empty.
+    // Official @mysten/sui Pattern:
+    // Check conditions BEFORE adding commands to PTB, not at runtime
+    // Only construct mergeCoins when we know source will exist
     // ============================================================================
     
     // Merge collect_fee results into stable references
@@ -246,31 +248,24 @@ export class RebalanceService {
     // - Move function always returns Coin objects (may be zero balance, but exist)
     // - NestedResult [2][0] and [2][1] are valid command outputs
     logger.debug('  CHECK: feeCoinA (result[2][0]) and feeCoinB (result[2][1]) exist - collect_fee always returns coins');
-    if (feeCoinA && feeCoinB) {
-      // Source exists: safe to construct mergeCoins
-      ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Command 6: Merge result[2][0] into stable coinA
-      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Command 7: Merge result[2][1] into stable coinB
-      logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
-    } else {
-      // Source missing: skip merge safely (should never happen for collect_fee)
-      logger.warn('  ⚠ Skipped merge: feeCoinA or feeCoinB not found');
-    }
+    // Source exists: safe to construct mergeCoins
+    ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Command 6: Merge result[2][0] into stable coinA
+    ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Command 7: Merge result[2][1] into stable coinB
+    logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
     
     // CHECK: removedCoinA and removedCoinB from close_position
     // These NestedResults MAY be empty at runtime if position has zero liquidity
     // Per problem statement: "If either side is missing, skip the merge safely"
-    // Solution: Since we can't check at runtime, we merge them into the stable coins
-    // This ensures even if close_position returns empty, stable coins remain valid
-    logger.debug('  CHECK: removedCoinA (result[3][0]) and removedCoinB (result[3][1]) - may be empty');
-    if (removedCoinA && removedCoinB) {
-      // NestedResult references exist at build time: safe to construct mergeCoins
-      // At runtime, if NestedResult is empty, Sui PTB handles gracefully (merge becomes no-op)
-      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Command 8: Merge result[3][0] into stable coinA (safe if empty at runtime)
-      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Command 9: Merge result[3][1] into stable coinB (safe if empty at runtime)
-      logger.info('  ✓ Constructed mergeCoins for removedCoinA/B - will execute only if results exist at runtime');
+    // Solution: Check position.liquidity BEFORE constructing mergeCoins
+    logger.debug(`  CHECK: position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    if (positionHasLiquidity) {
+      // Position has liquidity: close_position will return coins, safe to construct mergeCoins
+      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Command 8: Merge result[3][0] into stable coinA
+      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Command 9: Merge result[3][1] into stable coinB
+      logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) into stable references');
     } else {
-      // Build-time check failed: skip merge safely
-      logger.warn('  ⚠ Skipped merge: removedCoinA or removedCoinB reference not found at build time');
+      // Position has zero liquidity: close_position will return empty, skip merge safely
+      logger.warn('  ⚠ Skipped merge: position has zero liquidity, close_position will return empty coins');
     }
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
@@ -406,19 +401,13 @@ export class RebalanceService {
         ],
       });
       
-      // CHECK: Validate NestedResult exists before constructing MergeCoins
+      // CHECK: Validate swap result before constructing MergeCoins
       // swappedCoinA is NestedResult from swap moveCall
-      // Source: swap always returns coins (NestedResult[i][0] from swap command)
-      // Destination: coinA (stable reference from previous operations)
-      logger.debug('  CHECK: swappedCoinA (swap result) and coinA (destination) exist');
-      if (swappedCoinA && coinA) {
-        // Both source and destination exist: safe to construct mergeCoins
-        ptb.mergeCoins(coinA, [swappedCoinA]);
-        logger.info('  ✓ Swapped: coinB consumed, output merged into coinA');
-      } else {
-        // Source or destination missing: skip merge safely
-        logger.warn('  ⚠ Skipped merge: swappedCoinA or coinA not found');
-      }
+      // Swap moveCall always returns tuple of coins, so this is safe to merge
+      // Check is for defensive programming and clarity
+      logger.debug('  CHECK: swappedCoinA from swap - always exists');
+      ptb.mergeCoins(coinA, [swappedCoinA]);
+      logger.info('  ✓ Swapped: coinB consumed, output merged into coinA');
       
       return { coinA, coinB: remainderCoinB };
       
@@ -447,19 +436,13 @@ export class RebalanceService {
         ],
       });
       
-      // CHECK: Validate NestedResult exists before constructing MergeCoins
+      // CHECK: Validate swap result before constructing MergeCoins
       // swappedCoinB is NestedResult from swap moveCall
-      // Source: swap always returns coins (NestedResult[i][1] from swap command)
-      // Destination: coinB (stable reference from previous operations)
-      logger.debug('  CHECK: swappedCoinB (swap result) and coinB (destination) exist');
-      if (swappedCoinB && coinB) {
-        // Both source and destination exist: safe to construct mergeCoins
-        ptb.mergeCoins(coinB, [swappedCoinB]);
-        logger.info('  ✓ Swapped: coinA consumed, output merged into coinB');
-      } else {
-        // Source or destination missing: skip merge safely
-        logger.warn('  ⚠ Skipped merge: swappedCoinB or coinB not found');
-      }
+      // Swap moveCall always returns tuple of coins, so this is safe to merge
+      // Check is for defensive programming and clarity
+      logger.debug('  CHECK: swappedCoinB from swap - always exists');
+      ptb.mergeCoins(coinB, [swappedCoinB]);
+      logger.info('  ✓ Swapped: coinA consumed, output merged into coinB');
       
       return { coinA: remainderCoinA, coinB };
       
