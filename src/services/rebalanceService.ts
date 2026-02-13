@@ -387,8 +387,8 @@ export class RebalanceService {
       // If position has no liquidity, we only have collect_fee coins (likely zero)
       // In this case, skip the swap entirely to avoid referencing empty NestedResult
       if (!positionHasLiquidity) {
-        logger.warn('  ⚠ Skipping swap: position has no liquidity, coinB likely has zero balance');
-        logger.info('  Using coinA as-is (no swap needed)');
+        logger.warn('  ⚠ Skipping swap: position has no liquidity, coins likely have zero balance');
+        logger.info('  Using coins as-is (no swap performed)');
         return { coinA, coinB };
       }
       
@@ -426,8 +426,8 @@ export class RebalanceService {
       
       // CHECK: Only perform swap if we have liquidity (and thus coins to swap)
       if (!positionHasLiquidity) {
-        logger.warn('  ⚠ Skipping swap: position has no liquidity, coinA likely has zero balance');
-        logger.info('  Using coinB as-is (no swap needed)');
+        logger.warn('  ⚠ Skipping swap: position has no liquidity, coins likely have zero balance');
+        logger.info('  Using coins as-is (no swap performed)');
         return { coinA, coinB };
       }
       
