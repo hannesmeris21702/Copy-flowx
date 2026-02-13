@@ -269,17 +269,17 @@ export class RebalanceService {
     if (willReturnCoinB) {
       // close_position will return coinB - need to determine its index
       // If coinA is also returned, coinB is at index 1, otherwise it's at index 0
+      let removedCoinB;
       if (willReturnCoinA) {
         // Both coins returned: coinB is at index 1
-        const [, removedCoinB] = closePositionResult;  // Get second element
-        ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB - BASE LIQUIDITY
+        [, removedCoinB] = closePositionResult;
         logger.info('  ✓ Merged close_position coinB (result[3][1]) - BASE LIQUIDITY');
       } else {
         // Only coinB returned: it's at index 0
-        const [removedCoinB] = closePositionResult;  // Get first element
-        ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][0] into stable coinB - BASE LIQUIDITY
+        [removedCoinB] = closePositionResult;
         logger.info('  ✓ Merged close_position coinB (result[3][0]) - BASE LIQUIDITY');
       }
+      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge into stable coinB - BASE LIQUIDITY
     } else {
       logger.warn('  ⚠ Skipped coinB merge: close_position will not return coinB');
     }
