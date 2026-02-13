@@ -118,6 +118,7 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
+    logger.info('Order: collect_fee → remove_liquidity → merge → close → swap → open → add_liquidity → transfer');
     
     // Get SDK configuration
     const packageId = sdk.sdkOptions.integrate.published_at;
@@ -139,17 +140,31 @@ export class RebalanceService {
     }
     logger.debug('Type argument validation passed');
     
-    // Create zero coins upfront (before any moveCall operations)
-    // This ensures proper command indexing for all subsequent operations
-    logger.info('Creating zero-balance coins for transaction operations...');
+    // Step 1: Collect fees from old position FIRST (before removing liquidity)
+    // This is the correct order per Cetus SDK pattern
+    // Use SDK builder pattern: pool_script_v2::collect_fee
+    // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
+    logger.info('Step 1: Collect fees → returns [feeCoinA, feeCoinB]');
     const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
     const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
-    logger.info('  ✓ Zero coins created');
     
-    // Step 1: Remove liquidity from old position
+    const [feeCoinA, feeCoinB] = ptb.moveCall({
+      target: `${packageId}::pool_script_v2::collect_fee`,
+      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
+      arguments: [
+        ptb.object(globalConfigId),
+        ptb.object(pool.id),
+        ptb.object(position.id),
+        zeroCoinA,
+        zeroCoinB,
+      ],
+    });
+    logger.info('  ✓ Captured: feeCoinA, feeCoinB');
+    
+    // Step 2: Remove liquidity from old position
     // Use SDK builder pattern: pool_script::remove_liquidity
     // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
-    logger.info('Step 1: Remove liquidity → returns [coinA, coinB]');
+    logger.info('Step 2: Remove liquidity → returns [coinA, coinB]');
     const [removedCoinA, removedCoinB] = ptb.moveCall({
       target: `${packageId}::pool_script::remove_liquidity`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
@@ -164,25 +179,6 @@ export class RebalanceService {
       ],
     });
     logger.info('  ✓ Captured: removedCoinA, removedCoinB');
-    
-    // Step 2: Collect fees from old position
-    // Use SDK builder pattern: pool_script_v2::collect_fee
-    // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
-    // Uses the zero coins created earlier
-    logger.info('Step 2: Collect fees → returns [feeCoinA, feeCoinB]');
-    
-    const [feeCoinA, feeCoinB] = ptb.moveCall({
-      target: `${packageId}::pool_script_v2::collect_fee`,
-      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-      arguments: [
-        ptb.object(globalConfigId),
-        ptb.object(pool.id),
-        ptb.object(position.id),
-        zeroCoinA,
-        zeroCoinB,
-      ],
-    });
-    logger.info('  ✓ Captured: feeCoinA, feeCoinB');
     
     // Step 3: Merge removed liquidity with collected fees
     logger.info('Step 3: Merge coins');
@@ -270,6 +266,7 @@ export class RebalanceService {
     logger.info('  ✓ Position transferred');
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
+    logger.info('Flow: zeroCoin creation → collect_fee → remove_liquidity → merge → close → swap (if needed) → open → add_liquidity → transfer');
     logger.info('NO COIN OBJECTS DROPPED OR UNTRANSFERRED');
     
     // Add PTB validation: Print commands before build (as requested in problem statement)
