@@ -140,13 +140,19 @@ export class RebalanceService {
     }
     logger.debug('Type argument validation passed');
     
+    // Create zero coins upfront (before any moveCall operations)
+    // This ensures proper command indexing for all subsequent operations
+    // Using coinWithBalance ensures valid CoinObjects even with zero balance
+    logger.info('Creating zero-balance coins for transaction operations...');
+    const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
+    const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
+    logger.info('  ✓ Zero coins created');
+    
     // Step 1: Collect fees from old position FIRST (before closing)
     // This is the correct order per Cetus SDK pattern
     // Use SDK builder pattern: pool_script_v2::collect_fee
     // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
     logger.info('Step 1: Collect fees → returns [feeCoinA, feeCoinB]');
-    const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
-    const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
     
     const [feeCoinA, feeCoinB] = ptb.moveCall({
       target: `${packageId}::pool_script_v2::collect_fee`,
@@ -252,14 +258,13 @@ export class RebalanceService {
     logger.info('NO COIN OBJECTS DROPPED OR UNTRANSFERRED');
     
     // Add PTB validation: Print commands before build (as requested in problem statement)
-    // Use debug level to avoid performance overhead in production
     const ptbData = ptb.getData();
-    logger.debug('=== PTB COMMANDS VALIDATION ===');
-    logger.debug(`Total commands: ${ptbData.commands.length}`);
-    ptbData.commands.forEach((cmd, idx) => {
-      logger.debug(`Command ${idx}: ${JSON.stringify(cmd)}`);
+    console.log('=== PTB COMMANDS VALIDATION ===');
+    console.log(`Total commands: ${ptbData.commands.length}`);
+    ptbData.commands.forEach((cmd: any, idx: number) => {
+      console.log(`Command ${idx}: ${JSON.stringify(cmd)}`);
     });
-    logger.debug('=== END PTB COMMANDS ===');
+    console.log('=== END PTB COMMANDS ===');
     
     return ptb;
   }
