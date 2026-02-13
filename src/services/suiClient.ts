@@ -5,11 +5,13 @@ import { BotConfig } from '../types';
 import { logger } from '../utils/logger';
 import { withRetry } from '../utils/retry';
 import { isTypeArgError } from '../utils/typeArgNormalizer';
+import { SuiClientErrorDecoder } from 'suiclient-error-decoder';
 
 export class SuiClientService {
   private client: SuiClient;
   private keypair: Ed25519Keypair;
   private config: BotConfig;
+  private decoder: SuiClientErrorDecoder;
   
   constructor(config: BotConfig) {
     this.config = config;
@@ -23,6 +25,14 @@ export class SuiClientService {
     this.keypair = Ed25519Keypair.fromSecretKey(
       Buffer.from(config.privateKey.slice(2), 'hex')
     );
+    
+    // Initialize error decoder with custom error codes
+    this.decoder = new SuiClientErrorDecoder();
+    this.decoder.addErrorCodes({
+      1001: 'Cetus empty position',
+      2001: 'No fees',
+      4001: 'close_position 0 coins'
+    });
     
     logger.info(`Sui client initialized with RPC: ${config.rpcUrl}`);
     logger.info(`Wallet address: ${this.keypair.getPublicKey().toSuiAddress()}`);
@@ -165,6 +175,11 @@ export class SuiClientService {
         
       } catch (error) {
         lastError = error as Error;
+        
+        // Decode PTB CommandArgumentError using suiclient-error-decoder
+        const decoded = this.decoder.parseError(error);
+        console.error(`🚨 PTB: ${decoded.message} Cmd${decoded.code ?? 'N/A'}`);
+        console.error(`Fix: result[3][0] indexing`);
         
         // Check if this is a type argument related error
         const isTypeError = isTypeArgError(lastError);
