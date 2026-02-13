@@ -128,8 +128,8 @@ export class RebalanceService {
     // Determine which coins close_position will return based on position range vs current price
     // This is critical for avoiding SecondaryIndexOutOfBounds errors
     const currentTick = pool.currentTick;
-    const willReturnCoinA = positionHasLiquidity && currentTick < position.tickUpper;  // Below or in range
-    const willReturnCoinB = positionHasLiquidity && currentTick > position.tickLower;  // Above or in range (use > not >=)
+    const willReturnCoinA = positionHasLiquidity && currentTick <= position.tickUpper;  // Below or in range (includes boundaries)
+    const willReturnCoinB = positionHasLiquidity && currentTick >= position.tickLower;  // Above or in range (includes boundaries)
     logger.info(`close_position will return: coinA=${willReturnCoinA}, coinB=${willReturnCoinB} (currentTick=${currentTick}, range=[${position.tickLower}, ${position.tickUpper}])`);
     
     // Get SDK configuration
@@ -290,23 +290,24 @@ export class RebalanceService {
     // Fee coins are merged as secondary additions, not as the primary liquidity source.
     // Per @mysten/sui TransactionBlock pattern: guard each NestedResult independently
     // NOTE: collect_fee takes zeroCoinA and zeroCoinB and returns them with fees merged,
-    // so it should always return both coins (unlike close_position which may return variable outputs)
-    logger.debug(`  CHECK: Individual fee coins from collect_fee - willReturnCoinA=${willReturnCoinA}, willReturnCoinB=${willReturnCoinB}`);
+    // so it ALWAYS returns both coins (unlike close_position which may return variable outputs)
+    // However, we only merge if position has liquidity (fees only exist when position has liquidity)
+    logger.debug(`  CHECK: Individual fee coins from collect_fee - positionHasLiquidity=${positionHasLiquidity}`);
     
-    // Guard for feeCoinA (result[2][0]) - only merge if we have coinA in the position
-    if (willReturnCoinA) {
+    // Guard for feeCoinA (result[2][0]) - only merge if position has liquidity
+    if (positionHasLiquidity) {
       ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA - OPTIONAL ADDITION
       logger.info('  ✓ Merged feeCoinA (result[2][0]) - OPTIONAL ADDITION from collect_fee');
     } else {
-      logger.warn('  ⚠ Skipped feeCoinA merge: position has no coinA');
+      logger.warn('  ⚠ Skipped feeCoinA merge: position has no liquidity');
     }
     
-    // Guard for feeCoinB (result[2][1]) - only merge if we have coinB in the position
-    if (willReturnCoinB) {
+    // Guard for feeCoinB (result[2][1]) - only merge if position has liquidity
+    if (positionHasLiquidity) {
       ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB - OPTIONAL ADDITION
       logger.info('  ✓ Merged feeCoinB (result[2][1]) - OPTIONAL ADDITION from collect_fee');
     } else {
-      logger.warn('  ⚠ Skipped feeCoinB merge: position has no coinB');
+      logger.warn('  ⚠ Skipped feeCoinB merge: position has no liquidity');
     }
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
