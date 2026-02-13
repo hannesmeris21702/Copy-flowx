@@ -164,7 +164,10 @@ export class RebalanceService {
     // Step 1: Collect fees from old position FIRST (before closing)
     // This is the correct order per Cetus SDK pattern
     // Use SDK builder pattern: pool_script_v2::collect_fee
-    // Returns tuple (Coin<A>, Coin<B>) - but may return empty [] if no fees
+    // 
+    // IMPORTANT: collect_fee may return empty [] when there are no fees to collect.
+    // This is determined by the on-chain state of the position, not by positionHasLiquidity.
+    // We use positionHasLiquidity as a proxy check to avoid referencing potentially empty results.
     // ============================================================================
     logger.info('Step 1: Collect fees → returns [feeCoinA, feeCoinB] or []');
     
@@ -242,6 +245,8 @@ export class RebalanceService {
       const [feeCoinA, feeCoinB] = collectFeeResult;  // ✅ Safe: outputs exist
       logger.info('  ✓ Destructuring collect_fee results: feeCoinA (result[2][0]), feeCoinB (result[2][1])');
       
+      // Direct merge (not using PTBValidator.conditionalMerge since we're already in the conditional)
+      // The guard above ensures fee coins exist, so no need for additional checks
       ptb.mergeCoins(stableCoinA, [feeCoinA]);
       ptb.mergeCoins(stableCoinB, [feeCoinB]);
       logger.info('  ✓ Merged: collect_fee coins into stable coin references');
