@@ -152,7 +152,8 @@ export class SuiClientService {
     try {
       logger.info('🔍 Running pre-build PTB validation...');
       
-      // Clone transaction for validation (dry-run builds it)
+      // Clone transaction for validation (dry-run builds and consumes the transaction)
+      // We need to clone because Transaction.build() can only be called once
       const validationTx = Transaction.from(tx.serialize());
       
       await PTBValidator.validateBeforeBuild(

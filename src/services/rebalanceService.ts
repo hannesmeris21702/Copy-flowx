@@ -307,10 +307,12 @@ export class RebalanceService {
     // CHECK: feeCoinA and feeCoinB from collect_fee INDIVIDUALLY
     // These NestedResults (result[2][0] and result[2][1]) are optional additions to the base liquidity.
     // Fee coins are merged as secondary additions, not as the primary liquidity source.
-    // @copilot Fee coins are always returned by collect_fee but may have zero balance
+    // @copilot Fee coins always exist (collect_fee returns coins with zero balance if no fees)
+    // Guard prevents merging zero-balance coins when position has no liquidity
     logger.info('Step 3b: Merge collect_fee results (optional additions)');
     
     // Guard for feeCoinA and feeCoinB - only merge if position has liquidity
+    // (prevents unnecessary merge of zero-balance coins)
     if (positionHasLiquidity) {
       PTBValidator.conditionalMerge(
         ptb,

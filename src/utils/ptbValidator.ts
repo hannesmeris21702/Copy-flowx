@@ -75,12 +75,17 @@ export class PTBValidator {
           const resultIdx = match ? parseInt(match[1]) : undefined;
           const secondaryIdx = match ? parseInt(match[2]) : undefined;
           
+          const fixSuggestion = [
+            '@copilot Fix: Use conditional mergeCoins pattern.',
+            'Check if coin exists before merge:',
+            'if (willReturnCoin) { ptb.mergeCoins(destination, [source]); }'
+          ].join('\n');
+          
           throw new PTBValidationError(
             `SecondaryIndexOutOfBounds: Attempted to access result[${resultIdx}][${secondaryIdx}] but it doesn't exist`,
             resultIdx,
             'SecondaryIndexOutOfBounds',
-            // @copilot Fix: Use conditional mergeCoins pattern. Check if coin exists before merge:\n` +
-            `// if (willReturnCoin) { ptb.mergeCoins(destination, [source]); }`
+            fixSuggestion
           );
         }
         
@@ -116,7 +121,16 @@ export class PTBValidator {
    * 
    * @copilot This helps detect SecondaryIndexOutOfBounds before execution
    */
-  private static validateCommandStructure(ptbData: any): void {
+  private static validateCommandStructure(ptbData: {
+    commands?: Array<{
+      $kind?: string;
+      kind?: string;
+      arguments?: any[];
+      amounts?: any[];
+      [key: string]: any;
+    }>;
+    [key: string]: any;
+  }): void {
     logger.debug('  Validating command structure...');
     
     const commands = ptbData.commands || [];
@@ -149,6 +163,10 @@ export class PTBValidator {
   /**
    * Validates result references in command arguments
    * Detects potential SecondaryIndexOutOfBounds errors
+   * 
+   * @param cmd Command to validate
+   * @param cmdIndex Current command index
+   * @param _resultCounts Reserved for future: tracking expected result counts per command
    */
   private static validateResultReferences(
     cmd: any,
