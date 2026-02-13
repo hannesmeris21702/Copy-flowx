@@ -118,7 +118,7 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: collect_fee → remove_liquidity → merge → close → swap → open → add_liquidity → transfer');
+    logger.info('Order: collect_fee → close_position (removes liquidity) → merge → swap → open → add_liquidity → transfer');
     
     // Get SDK configuration
     const packageId = sdk.sdkOptions.integrate.published_at;
@@ -140,7 +140,7 @@ export class RebalanceService {
     }
     logger.debug('Type argument validation passed');
     
-    // Step 1: Collect fees from old position FIRST (before removing liquidity)
+    // Step 1: Collect fees from old position FIRST (before closing)
     // This is the correct order per Cetus SDK pattern
     // Use SDK builder pattern: pool_script_v2::collect_fee
     // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
@@ -161,24 +161,24 @@ export class RebalanceService {
     });
     logger.info('  ✓ Captured: feeCoinA, feeCoinB');
     
-    // Step 2: Remove liquidity from old position
-    // Use SDK builder pattern: pool_script::remove_liquidity
+    // Step 2: Close position (removes liquidity AND closes position NFT)
+    // Use SDK builder pattern: pool_script::close_position
     // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
-    logger.info('Step 2: Remove liquidity → returns [coinA, coinB]');
+    // This replaces the separate remove_liquidity + close_position pattern
+    logger.info('Step 2: Close position (removes liquidity & closes NFT) → returns [coinA, coinB]');
     const [removedCoinA, removedCoinB] = ptb.moveCall({
-      target: `${packageId}::pool_script::remove_liquidity`,
+      target: `${packageId}::pool_script::close_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         ptb.object(position.id),
-        ptb.pure.u128(position.liquidity),
         ptb.pure.u64(minAmountA.toString()),
         ptb.pure.u64(minAmountB.toString()),
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
-    logger.info('  ✓ Captured: removedCoinA, removedCoinB');
+    logger.info('  ✓ Captured: removedCoinA, removedCoinB (includes all liquidity)');
     
     // Step 3: Merge removed liquidity with collected fees
     logger.info('Step 3: Merge coins');
@@ -186,26 +186,8 @@ export class RebalanceService {
     ptb.mergeCoins(removedCoinB, [feeCoinB]);
     logger.info('  ✓ After merge: removedCoinA, removedCoinB contain all funds');
     
-    // Step 4: Close old position
-    // Use SDK builder pattern: pool_script::close_position
-    // Takes 6 arguments: config, pool, position, min_amount_a, min_amount_b, clock
-    logger.info('Step 4: Close old position (NFT cleanup)');
-    ptb.moveCall({
-      target: `${packageId}::pool_script::close_position`,
-      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-      arguments: [
-        ptb.object(globalConfigId),
-        ptb.object(pool.id),
-        ptb.object(position.id),
-        ptb.pure.u64('0'), // min_amount_a - already removed liquidity with slippage protection
-        ptb.pure.u64('0'), // min_amount_b - already removed liquidity with slippage protection
-        ptb.object(SUI_CLOCK_OBJECT_ID), // clock
-      ],
-    });
-    logger.info('  ✓ Position closed');
-    
-    // Step 5: Swap to optimal ratio if needed
-    logger.info('Step 5: Swap to optimal ratio (if needed)');
+    // Step 4: Swap to optimal ratio if needed
+    logger.info('Step 4: Swap to optimal ratio (if needed)');
     const { coinA: finalCoinA, coinB: finalCoinB } = this.addSwapIfNeeded(
       ptb,
       pool,
@@ -219,9 +201,9 @@ export class RebalanceService {
     );
     logger.info('  ✓ Final coins ready: finalCoinA, finalCoinB');
     
-    // Step 6: Open new position
+    // Step 5: Open new position
     // Use SDK builder pattern with proper tick conversion from SDK's asUintN
-    logger.info('Step 6: Open new position → returns newPosition NFT');
+    logger.info('Step 5: Open new position → returns newPosition NFT');
     
     // Convert signed ticks to u32 using BigInt.asUintN (SDK pattern)
     const tickLowerU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickLower)));
@@ -239,9 +221,9 @@ export class RebalanceService {
     });
     logger.info('  ✓ Captured: newPosition NFT');
     
-    // Step 7: Add liquidity to new position
+    // Step 6: Add liquidity to new position
     // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-    logger.info('Step 7: Add liquidity → consumes finalCoinA, finalCoinB');
+    logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
@@ -260,13 +242,13 @@ export class RebalanceService {
     });
     logger.info('  ✓ Liquidity added, coins consumed');
     
-    // Step 8: Transfer new position NFT to sender
-    logger.info('Step 8: Transfer newPosition NFT to sender');
+    // Step 7: Transfer new position NFT to sender
+    logger.info('Step 7: Transfer newPosition NFT to sender');
     ptb.transferObjects([newPosition], ptb.pure.address(this.suiClient.getAddress()));
     logger.info('  ✓ Position transferred');
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
-    logger.info('Flow: zeroCoin creation → collect_fee → remove_liquidity → merge → close → swap (if needed) → open → add_liquidity → transfer');
+    logger.info('Flow: zeroCoin creation → collect_fee → close_position (removes liquidity) → merge → swap (if needed) → open → add_liquidity → transfer');
     logger.info('NO COIN OBJECTS DROPPED OR UNTRANSFERRED');
     
     // Add PTB validation: Print commands before build (as requested in problem statement)
