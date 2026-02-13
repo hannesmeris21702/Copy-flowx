@@ -123,7 +123,7 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: create zero coins → collect_fee → close_position (side effects only) → merge fees → swap → open → add_liquidity → transfer');
+    logger.info('Order: create zero coins → collect_fee (side effects) → close_position (side effects) → stable coins → swap → open → add_liquidity → transfer');
     
     // CHECK: Validate position liquidity before building PTB
     const positionHasLiquidity = BigInt(position.liquidity) > BigInt(0);
@@ -165,16 +165,16 @@ export class RebalanceService {
     // This is the correct order per Cetus SDK pattern
     // Use SDK builder pattern: pool_script_v2::collect_fee
     // 
-    // IMPORTANT: collect_fee may return empty [] when there are no fees to collect.
-    // This is determined by the on-chain state of the position, not by positionHasLiquidity.
-    // We use positionHasLiquidity as a proxy check to avoid referencing potentially empty results.
+    // CRITICAL: collect_fee is called for SIDE EFFECTS ONLY
+    // Its outputs are NOT captured or referenced to avoid SecondaryIndexOutOfBounds
+    // when collect_fee returns zero coins
     // ============================================================================
-    logger.info('Step 1: Collect fees → returns [feeCoinA, feeCoinB] or []');
+    logger.info('Step 1: Collect fees → called for side effects only (outputs NOT used)');
     
-    // Command 2: collect_fee moveCall - Returns tuple [Coin<A>, Coin<B>] or []
-    // NOTE: collectFeeResult is NOT destructured here to avoid SecondaryIndexOutOfBounds
-    // We'll conditionally reference indices only when we know outputs exist
-    const collectFeeResult = ptb.moveCall({
+    // Command 2: collect_fee moveCall
+    // Called for side effects only - returns are NOT used (no NestedResult references)
+    // This ensures transaction succeeds even if collect_fee returns 0 coins
+    ptb.moveCall({
       target: `${packageId}::pool_script_v2::collect_fee`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
@@ -185,14 +185,14 @@ export class RebalanceService {
         zeroCoinB,  // Using Command 1
       ],
     });
-    // DO NOT destructure here - deferred until we confirm outputs exist
-    logger.info('  ✓ collect_fee called (outputs will be conditionally merged)');
+    // NOTE: Result is NOT captured or destructured - zero NestedResult[result_idx=2] in PTB
+    logger.info('  ✓ collect_fee called (outputs discarded - side effects only)');
     
     // ============================================================================
     // Step 2: Close position (removes liquidity AND closes position NFT)
     // Use SDK builder pattern: pool_script::close_position
     // IMPORTANT: Called for SIDE EFFECTS ONLY - outputs are NOT used
-    // All liquidity comes from collect_fee results
+    // All liquidity comes from coinWithBalance intents
     // ============================================================================
     logger.info('Step 2: Close position (removes liquidity & closes NFT) → called for side effects only');
     
@@ -215,47 +215,27 @@ export class RebalanceService {
     logger.info('  ✓ close_position called (outputs discarded - side effects only)');
     
     // ============================================================================
-    // Step 3: Merge collect_fee results - SOLE LIQUIDITY SOURCE
+    // Step 3: Use coinWithBalance intents as SOLE LIQUIDITY SOURCE
     // 
     // LIQUIDITY STRATEGY:
-    // - collect_fee outputs are the ONLY source of liquidity
-    // - close_position is called for side effects only (no NestedResult references)
-    // - Transaction succeeds even if close_position returns 0 coins
+    // - collect_fee is called for side effects only (NO outputs used)
+    // - close_position is called for side effects only (NO outputs used)
+    // - coinWithBalance intents are the ONLY liquidity containers
+    // - Transaction succeeds even if collect_fee or close_position return 0 coins
     // 
     // Official @mysten/sui Pattern:
-    // 1. Create stable coin references that always exist (splitCoins from zero coins)
-    // 2. Conditionally merge collect_fee results into stable coins (only if they exist)
-    // 3. Use stable coins for downstream operations (swap, add_liquidity)
+    // 1. Create stable coin references using splitCoins from zero coins
+    // 2. Use stable coins directly for downstream operations (swap, add_liquidity)
+    // 3. No conditional merging - all liquidity comes from intents
     // ============================================================================
-    logger.info('Step 3: Merge collect_fee results - sole liquidity source');
+    logger.info('Step 3: Prepare stable coin references - sole liquidity source');
     
     // Create stable coins using splitCoins with zero amounts
     // These serve as guaranteed-valid coin references for downstream operations
     const [stableCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create stable coinA reference
     const [stableCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
     logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
-    
-    // Conditionally merge collect_fee results into stable coins
-    // Fee coins from collect_fee (result[2][0] and result[2][1]) are the sole liquidity source
-    // IMPORTANT: Only destructure and merge if position has liquidity (fees exist)
-    // This implements the deferred destructuring pattern to avoid SecondaryIndexOutOfBounds
-    logger.info(`  CHECK: collect_fee outputs (positionHasLiquidity=${positionHasLiquidity})...`);
-    if (positionHasLiquidity) {
-      // Only NOW create the NestedResult references when we know they exist
-      const [feeCoinA, feeCoinB] = collectFeeResult;  // ✅ Safe: outputs exist
-      logger.info('  ✓ Destructuring collect_fee results: feeCoinA (result[2][0]), feeCoinB (result[2][1])');
-      
-      // Direct merge (not using PTBValidator.conditionalMerge since we're already in the conditional)
-      // The guard above ensures fee coins exist, so no need for additional checks
-      ptb.mergeCoins(stableCoinA, [feeCoinA]);
-      ptb.mergeCoins(stableCoinB, [feeCoinB]);
-      logger.info('  ✓ Merged: collect_fee coins into stable coin references');
-    } else {
-      // DO NOT reference collectFeeResult[0] or [1] - they don't exist
-      logger.info('  ⊘ Skipped merge: position has no liquidity, fee coins do not exist');
-    }
-    
-    logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
+    logger.info('  ✓ Stable coin references ready for swap operations (NO merge operations)');
     
     // Step 4: Swap to optimal ratio if needed
     logger.info('Step 4: Swap to optimal ratio (if needed)');
@@ -320,8 +300,9 @@ export class RebalanceService {
     logger.info('  ✓ Position transferred');
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
-    logger.info('Flow: zeroCoin creation → collect_fee → close_position (removes liquidity) → merge → swap (if needed) → open → add_liquidity → transfer');
-    logger.info('NO COIN OBJECTS DROPPED OR UNTRANSFERRED');
+    logger.info('Flow: zeroCoin creation → collect_fee (side effects) → close_position (side effects) → stable coins → swap (if needed) → open → add_liquidity → transfer');
+    logger.info('NO COIN OBJECTS FROM collect_fee OR close_position REFERENCED');
+    logger.info('ALL LIQUIDITY FROM coinWithBalance INTENTS ONLY');
     
     // Add PTB validation: Print commands with detailed info before build
     // Log 'Command ${i}: ${txb.getEffects()}' as requested in problem statement
@@ -340,12 +321,8 @@ export class RebalanceService {
     
     // Validate NestedResult references before building PTB
     // This ensures no NestedResult references a command result index that doesn't exist
+    // CRITICAL: After fix, there should be NO NestedResult[2] references (collect_fee)
     this.validateNestedResultReferences(ptb);
-    
-    // Validate MergeCoins references to collect_fee results
-    // This prevents invalid PTB construction where MergeCoins references collect_fee
-    // results that may not exist
-    this.validateCollectFeeMergeCoins(ptb, positionHasLiquidity);
     
     return ptb;
   }
@@ -355,14 +332,21 @@ export class RebalanceService {
    * This prevents invalid PTB construction where a NestedResult references a command
    * that doesn't exist or hasn't been executed yet.
    * 
+   * CRITICAL: After the PTB fix, there should be ZERO NestedResult[2] references,
+   * as command 2 (collect_fee) is called for side effects only.
+   * 
    * @param ptb - The Transaction to validate
-   * @throws Error if any NestedResult references an invalid command index
+   * @throws Error if any NestedResult references an invalid command index or collect_fee (command 2)
    */
   private validateNestedResultReferences(ptb: Transaction): void {
     const ptbData = ptb.getData();
     const totalCommands = ptbData.commands.length;
     
     logger.debug(`Validating NestedResult references in PTB with ${totalCommands} commands`);
+    
+    // Track if we find any NestedResult[2] references (collect_fee)
+    let hasCollectFeeReferences = false;
+    const collectFeeReferences: string[] = [];
     
     // Helper function to recursively check for NestedResult in an object
     const checkForNestedResult = (obj: unknown, currentCommandIdx: number, path: string = ''): void => {
@@ -373,6 +357,12 @@ export class RebalanceService {
       // Check if this is a NestedResult
       if (typeof obj === 'object' && obj !== null && '$kind' in obj && obj.$kind === 'NestedResult' && 'NestedResult' in obj && Array.isArray(obj.NestedResult)) {
         const [commandIndex, resultIndex] = obj.NestedResult;
+        
+        // CRITICAL CHECK: Fail if referencing command 2 (collect_fee)
+        if (commandIndex === 2) {
+          hasCollectFeeReferences = true;
+          collectFeeReferences.push(`${path}: NestedResult[${commandIndex}][${resultIndex}]`);
+        }
         
         // Validate that the referenced command index exists and comes before current command
         if (commandIndex < 0 || commandIndex >= totalCommands) {
@@ -415,91 +405,20 @@ export class RebalanceService {
       checkForNestedResult(cmd, idx, `Command[${idx}]`);
     });
     
-    logger.info(`✓ PTB validation passed: all NestedResult references are valid`);
-  }
-  
-  /**
-   * Validates that MergeCoins commands do not reference collect_fee results unless they exist.
-   * This prevents invalid PTB construction where MergeCoins tries to merge fee coins that
-   * were not actually returned by collect_fee (e.g., when position has zero liquidity).
-   * 
-   * @param ptb - The Transaction to validate
-   * @param positionHasLiquidity - Whether the position has liquidity (determines if fee coins exist)
-   * @throws Error if MergeCoins references collect_fee results when they shouldn't exist
-   */
-  private validateCollectFeeMergeCoins(ptb: Transaction, positionHasLiquidity: boolean): void {
-    const ptbData = ptb.getData();
-    
-    // Dynamically find the collect_fee command by searching for the moveCall
-    // This is more robust than hardcoding the index
-    let collectFeeCommandIndex = -1;
-    ptbData.commands.forEach((cmd: unknown, idx: number) => {
-      if (typeof cmd === 'object' && cmd !== null && '$kind' in cmd && cmd.$kind === 'MoveCall') {
-        const moveCallData = (cmd as any).MoveCall;
-        if (moveCallData?.target?.includes('collect_fee')) {
-          collectFeeCommandIndex = idx;
-        }
-      }
-    });
-    
-    // If no collect_fee command found, no validation needed
-    if (collectFeeCommandIndex === -1) {
-      logger.debug('No collect_fee command found in PTB, skipping validation');
-      return;
+    // CRITICAL: Fail if any NestedResult[2] references found
+    if (hasCollectFeeReferences) {
+      const referenceList = collectFeeReferences.join('\n  - ');
+      throw new Error(
+        `CRITICAL PTB VALIDATION FAILURE: Found ${collectFeeReferences.length} NestedResult[2] reference(s).\n` +
+        `Command 2 (collect_fee) must be called for side effects only with NO output references.\n` +
+        `This violates the invariant: PTB must contain ZERO references to collect_fee outputs.\n\n` +
+        `Found references:\n  - ${referenceList}\n\n` +
+        `Fix: Remove ALL destructuring and mergeCoins operations that source from collect_fee.`
+      );
     }
     
-    logger.debug(`Validating MergeCoins references to collect_fee results (command ${collectFeeCommandIndex})`);
-    logger.debug(`Position has liquidity: ${positionHasLiquidity}`);
-    
-    // Helper function to check if an argument references collect_fee results
-    const referencesCollectFee = (arg: unknown): boolean => {
-      if (!arg || typeof arg !== 'object') {
-        return false;
-      }
-      
-      // Check if this is a NestedResult referencing collect_fee command
-      if ('$kind' in arg && arg.$kind === 'NestedResult' && 'NestedResult' in arg && Array.isArray(arg.NestedResult)) {
-        const [commandIndex] = arg.NestedResult;
-        return commandIndex === collectFeeCommandIndex;
-      }
-      
-      // Recursively check arrays and objects
-      if (Array.isArray(arg)) {
-        return arg.some(item => referencesCollectFee(item));
-      }
-      
-      return Object.values(arg).some(value => referencesCollectFee(value));
-    };
-    
-    // Check each command for MergeCoins referencing collect_fee
-    ptbData.commands.forEach((cmd: unknown, idx: number) => {
-      // Check if this is a MergeCoins command
-      if (typeof cmd === 'object' && cmd !== null && '$kind' in cmd && cmd.$kind === 'MergeCoins') {
-        const mergeCoinsData = (cmd as any).MergeCoins;
-        const sources = mergeCoinsData?.sources || [];
-        
-        // Check if any source references collect_fee results
-        const hasCollectFeeReference = sources.some((source: unknown) => referencesCollectFee(source));
-        
-        if (hasCollectFeeReference) {
-          logger.debug(`  Command ${idx} (MergeCoins) references collect_fee results`);
-          
-          // If position has no liquidity, MergeCoins should not reference collect_fee
-          if (!positionHasLiquidity) {
-            throw new Error(
-              `Invalid PTB construction: MergeCoins at command ${idx} references ` +
-              `collect_fee results (command ${collectFeeCommandIndex}), but position has zero liquidity. ` +
-              `Fee coins do not exist and cannot be merged. ` +
-              `This indicates a bug in the conditional guards.`
-            );
-          }
-          
-          logger.debug(`  ✓ Valid: MergeCoins references collect_fee and position has liquidity`);
-        }
-      }
-    });
-    
-    logger.info(`✓ MergeCoins validation passed: no invalid references to collect_fee results`);
+    logger.info(`✓ PTB validation passed: all NestedResult references are valid`);
+    logger.info(`✓ ZERO NestedResult[2] references found (collect_fee is side-effects only)`);
   }
   
   private addSwapIfNeeded(
