@@ -6,6 +6,7 @@ import { logger } from '../utils/logger';
 import { withRetry } from '../utils/retry';
 import { isTypeArgError } from '../utils/typeArgNormalizer';
 import { SuiClientErrorDecoder } from 'suiclient-error-decoder';
+import { PTBValidator, PTBValidationError } from '../utils/ptbValidator';
 
 export class SuiClientService {
   private client: SuiClient;
@@ -130,6 +131,8 @@ export class SuiClientService {
    * Type arguments are validated and auto-corrected using TypeTagSerializer during PTB build
    * Retries up to maxRetries times with exponential backoff delay
    * 
+   * @copilot PTB validation happens before build() to catch SecondaryIndexOutOfBounds early
+   * 
    * @param tx The transaction to execute
    * @param maxRetries Maximum number of retry attempts
    * @returns Promise resolving to the transaction response
@@ -142,6 +145,45 @@ export class SuiClientService {
     let lastError: Error = new Error('Transaction execution failed with unknown error');
     
     logger.debug(`Starting PTB execution with ${maxRetries} maximum retry attempts`);
+    
+    // PRE-BUILD VALIDATION: Validate PTB structure before first execution attempt
+    // This catches SecondaryIndexOutOfBounds and other structural issues early
+    // @copilot If validation fails, check result[x][y] indexing and conditional merge patterns
+    try {
+      logger.info('🔍 Running pre-build PTB validation...');
+      
+      // Clone transaction for validation (dry-run builds it)
+      const validationTx = Transaction.from(tx.serialize());
+      
+      await PTBValidator.validateBeforeBuild(
+        validationTx,
+        this.client,
+        this.getAddress()
+      );
+      
+      logger.info('✓ Pre-build validation passed');
+    } catch (error) {
+      if (error instanceof PTBValidationError) {
+        // Log detailed validation error with Copilot fix suggestion
+        logger.error('❌ PTB Validation Failed (detected before execution)');
+        logger.error(`  Error Type: ${error.errorType || 'Unknown'}`);
+        logger.error(`  Command: ${error.commandIndex ?? 'N/A'}`);
+        logger.error(`  Message: ${error.message}`);
+        
+        if (error.suggestion) {
+          logger.error('  💡 Copilot Fix Suggestion:');
+          logger.error(`     ${error.suggestion}`);
+        }
+        
+        // @copilot Error Lens will show this inline. Fix by:
+        // 1. Checking result index references (result[x][y])
+        // 2. Using conditional mergeCoins when coin may not exist
+        // 3. Following Cetus SDK patterns for liquidity handling
+        throw error;
+      }
+      
+      logger.warn('⚠ Pre-build validation encountered error, proceeding with execution:', error);
+    }
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -179,7 +221,26 @@ export class SuiClientService {
         // Decode PTB CommandArgumentError using suiclient-error-decoder
         const decoded = this.decoder.parseError(error);
         logger.error(`🚨 PTB: ${decoded.message} Cmd${decoded.code ?? 'N/A'}`);
-        logger.error(`Fix: result[3][0] indexing`);
+        
+        // Special handling for SecondaryIndexOutOfBounds errors
+        // @copilot This error occurs when accessing result[x][y] where y doesn't exist
+        // Fix by using conditional mergeCoins pattern from Cetus SDK
+        if (lastError.message.includes('SecondaryIndexOutOfBounds')) {
+          logger.error('❌ SecondaryIndexOutOfBounds detected');
+          logger.error('   This typically happens when:');
+          logger.error('   1. Accessing result[x][y] where coin y was not returned');
+          logger.error('   2. close_position returns 0-2 coins based on liquidity');
+          logger.error('   3. collect_fee may return empty coins');
+          logger.error('');
+          logger.error('💡 Copilot Fix: Use conditional mergeCoins pattern:');
+          logger.error('   if (willReturnCoin) {');
+          logger.error('     ptb.mergeCoins(destination, [source]);');
+          logger.error('   }');
+          logger.error('');
+          logger.error('   See Cetus SDK examples for proper liquidity handling');
+        }
+        
+        logger.error(`Fix: result[3][0] indexing - Check conditional merge patterns`);
         
         // Check if this is a type argument related error
         const isTypeError = isTypeArgError(lastError);
