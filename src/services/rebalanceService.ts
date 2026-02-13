@@ -257,18 +257,30 @@ export class RebalanceService {
     }
     
     // STEP 2: Merge collect_fee results SECOND - these are OPTIONAL ADDITIONS
-    // CHECK: feeCoinA and feeCoinB from collect_fee
+    // CHECK: feeCoinA and feeCoinB from collect_fee INDIVIDUALLY
     // These NestedResults (result[2][0] and result[2][1]) are optional additions to the base liquidity.
     // Fee coins are merged as secondary additions, not as the primary liquidity source.
-    logger.debug(`  CHECK: feeCoinA (result[2][0]) and feeCoinB (result[2][1]) - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    // Per @mysten/sui TransactionBlock pattern: guard each NestedResult independently
+    logger.debug(`  CHECK: Individual fee coins from collect_fee - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    
+    // Guard for feeCoinA (result[2][0]) - check if this specific NestedResult exists
     if (positionHasLiquidity) {
-      // Position has liquidity: fees may have accumulated, safe to merge collect_fee results as optional additions
+      // Position has liquidity: feeCoinA may exist, safe to merge
       ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA - OPTIONAL ADDITION
-      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB - OPTIONAL ADDITION
-      logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) - OPTIONAL ADDITIONS from collect_fee');
+      logger.info('  ✓ Merged feeCoinA (result[2][0]) - OPTIONAL ADDITION from collect_fee');
     } else {
-      // Position has zero liquidity: no fees accumulated, skip merge safely
-      logger.warn('  ⚠ Skipped fee additions: position has zero liquidity, collect_fee returned zero-balance coins');
+      // Position has zero liquidity: feeCoinA does not exist, skip merge safely
+      logger.warn('  ⚠ Skipped feeCoinA merge: NestedResult[2][0] does not exist (zero liquidity position)');
+    }
+    
+    // Guard for feeCoinB (result[2][1]) - check if this specific NestedResult exists
+    if (positionHasLiquidity) {
+      // Position has liquidity: feeCoinB may exist, safe to merge
+      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB - OPTIONAL ADDITION
+      logger.info('  ✓ Merged feeCoinB (result[2][1]) - OPTIONAL ADDITION from collect_fee');
+    } else {
+      // Position has zero liquidity: feeCoinB does not exist, skip merge safely
+      logger.warn('  ⚠ Skipped feeCoinB merge: NestedResult[2][1] does not exist (zero liquidity position)');
     }
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
