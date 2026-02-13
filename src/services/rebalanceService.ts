@@ -232,46 +232,43 @@ export class RebalanceService {
     // ============================================================================
     // EXPLICIT CHECK: Validate NestedResult exists before constructing MergeCoins
     // 
-    // For close_position NestedResult [3][0] and [3][1]:
-    // - At build time, we check if position has liquidity
-    // - If liquidity > 0, close_position will return coins → safe to merge
-    // - If liquidity == 0, close_position returns empty → SKIP merge
+    // LIQUIDITY DERIVATION ORDER (per requirements):
+    // 1. PRIMARY SOURCE: close_position results (base liquidity for new position)
+    // 2. SECONDARY SOURCE: collect_fee results (optional additions only)
     // 
     // Official @mysten/sui Pattern:
     // Check conditions BEFORE adding commands to PTB, not at runtime
     // Only construct mergeCoins when we know source will exist
     // ============================================================================
     
-    // Merge collect_fee results into stable references
-    // CHECK: feeCoinA and feeCoinB from collect_fee
-    // These NestedResults (result[2][0] and result[2][1]) should only be merged
-    // if collect_fee actually returned them. The official Sui TransactionBlock pattern
-    // is to check preconditions before constructing mergeCoins commands.
-    // Only merge fee coins if position has liquidity (positions with liquidity can accumulate fees)
-    logger.debug(`  CHECK: feeCoinA (result[2][0]) and feeCoinB (result[2][1]) - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
-    if (positionHasLiquidity) {
-      // Position has liquidity: fees may have accumulated, safe to merge collect_fee results
-      ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA
-      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB
-      logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
-    } else {
-      // Position has zero liquidity: no fees accumulated, skip merge safely
-      logger.warn('  ⚠ Skipped fee merge: position has zero liquidity, collect_fee returned zero-balance coins');
-    }
-    
+    // STEP 1: Merge close_position results FIRST - this is the BASE LIQUIDITY
     // CHECK: removedCoinA and removedCoinB from close_position
-    // These NestedResults MAY be empty at runtime if position has zero liquidity
-    // Per problem statement: "If either side is missing, skip the merge safely"
-    // Solution: Check position.liquidity BEFORE constructing mergeCoins
-    logger.debug(`  CHECK: position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    // These NestedResults (result[3][0] and result[3][1]) form the primary liquidity source
+    // for the new position. Always merge these first to establish base liquidity.
+    logger.debug(`  CHECK: removedCoinA (result[3][0]) and removedCoinB (result[3][1]) - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
     if (positionHasLiquidity) {
       // Position has liquidity: close_position will return coins, safe to construct mergeCoins
-      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA
-      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB
-      logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) into stable references');
+      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA - BASE LIQUIDITY
+      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB - BASE LIQUIDITY
+      logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) - BASE LIQUIDITY from close_position');
     } else {
       // Position has zero liquidity: close_position would return empty, skip merge safely
-      logger.warn('  ⚠ Skipped merge: position has zero liquidity, close_position would return empty coins');
+      logger.warn('  ⚠ Skipped base liquidity merge: position has zero liquidity, close_position would return empty coins');
+    }
+    
+    // STEP 2: Merge collect_fee results SECOND - these are OPTIONAL ADDITIONS
+    // CHECK: feeCoinA and feeCoinB from collect_fee
+    // These NestedResults (result[2][0] and result[2][1]) are optional additions to the base liquidity.
+    // Fee coins are merged as secondary additions, not as the primary liquidity source.
+    logger.debug(`  CHECK: feeCoinA (result[2][0]) and feeCoinB (result[2][1]) - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    if (positionHasLiquidity) {
+      // Position has liquidity: fees may have accumulated, safe to merge collect_fee results as optional additions
+      ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA - OPTIONAL ADDITION
+      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB - OPTIONAL ADDITION
+      logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) - OPTIONAL ADDITIONS from collect_fee');
+    } else {
+      // Position has zero liquidity: no fees accumulated, skip merge safely
+      logger.warn('  ⚠ Skipped fee additions: position has zero liquidity, collect_fee returned zero-balance coins');
     }
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
