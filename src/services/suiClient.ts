@@ -178,8 +178,8 @@ export class SuiClientService {
         
         // Decode PTB CommandArgumentError using suiclient-error-decoder
         const decoded = this.decoder.parseError(error);
-        console.error(`🚨 PTB: ${decoded.message} Cmd${decoded.code ?? 'N/A'}`);
-        console.error(`Fix: result[3][0] indexing`);
+        logger.error(`🚨 PTB: ${decoded.message} Cmd${decoded.code ?? 'N/A'}`);
+        logger.error(`Fix: result[3][0] indexing`);
         
         // Check if this is a type argument related error
         const isTypeError = isTypeArgError(lastError);
