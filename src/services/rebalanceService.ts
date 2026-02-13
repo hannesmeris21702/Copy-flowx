@@ -118,7 +118,7 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: create zero coins → collect_fee → close_position (removes liquidity) → merge → swap → open → add_liquidity → transfer');
+    logger.info('Order: create zero coins → collect_fee → close_position (removes liquidity) → create placeholders → merge fees (always) → merge liquidity (if exists) → swap → open → add_liquidity → transfer');
     
     // CHECK: Validate position liquidity before building PTB
     // This allows us to determine if close_position will return coins
