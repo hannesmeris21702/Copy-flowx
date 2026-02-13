@@ -208,86 +208,63 @@ export class RebalanceService {
     logger.info('  ✓ close_position called (outputs will be conditionally referenced)');
     
     // ============================================================================
-    // Step 3: Conditionally reference close_position results and merge coins safely
+    // Step 3: Create placeholder coins and merge safely
     // 
-    // PROBLEM: close_position may return empty coins if position has zero liquidity.
-    // If NestedResult [3][0] or [3][1] is empty at runtime, mergeCoins will fail.
+    // IMPORTANT DISTINCTION:
+    // - collect_fee ALWAYS returns coins (even if amounts are 0), so can be merged unconditionally
+    // - close_position returns coins ONLY if amounts > 0, so must be merged conditionally
     // 
-    // SOLUTION: Add explicit checks before constructing MergeCoins commands.
-    // For NestedResult that may be empty (close_position), verify existence before merge.
-    // If source/destination missing, skip the merge safely using official Sui patterns.
+    // When position is out of range, one side of close_position may be 0 and won't be returned.
+    // We handle this by checking position liquidity before destructuring close_position results.
     // 
     // Official @mysten/sui Pattern:
     // 1. Create stable coin references that always exist (splitCoins from zero coins)
-    // 2. Check if NestedResult sources exist before adding mergeCoins command
-    // 3. Only construct mergeCoins when both source and destination are guaranteed valid
-    // 4. For uncertain sources, use the stable reference directly without merging
+    // 2. Merge collect_fee results unconditionally (they always exist)
+    // 3. Conditionally merge close_position results only when position has liquidity
     // ============================================================================
-    logger.info('Step 3: Conditionally reference close_position results and merge coins safely');
+    logger.info('Step 3: Create placeholder coins and merge fees and liquidity safely');
     
-    // Create stable coins using splitCoins with zero amounts
+    // Create placeholder coins using splitCoins with zero amounts
     // These serve as guaranteed-valid coin references for downstream operations
-    const [stableCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create stable coinA reference
-    const [stableCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
-    logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
+    const [placeholderA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create placeholder coinA
+    const [placeholderB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create placeholder coinB
+    logger.info('  ✓ Created placeholder coin references via splitCoins(zeroCoin, [0])');
+    
+    // Initialize our working coins with the placeholders
+    let workingCoinA = placeholderA;
+    let workingCoinB = placeholderB;
     
     // ============================================================================
-    // EXPLICIT CHECK: Validate NestedResult exists before constructing MergeCoins
-    // 
-    // LIQUIDITY DERIVATION ORDER (per requirements):
-    // 1. PRIMARY SOURCE: close_position results (base liquidity for new position)
-    // 2. SECONDARY SOURCE: collect_fee results (optional additions only)
-    // 
-    // Official @mysten/sui Pattern:
-    // Check conditions BEFORE adding commands to PTB, not at runtime
-    // Only construct mergeCoins when we know source will exist
+    // STEP 1: Merge collect_fee results FIRST (ALWAYS - fees always returned)
+    // collect_fee returns coins even if the fee amounts are 0, so these can always be safely merged
     // ============================================================================
+    logger.info('  Merging collect_fee results (always safe - fees always returned even if 0)');
+    ptb.mergeCoins(workingCoinA, [feeCoinA]);  // Always safe: collect_fee always returns feeCoinA
+    ptb.mergeCoins(workingCoinB, [feeCoinB]);  // Always safe: collect_fee always returns feeCoinB
+    logger.info('  ✓ Merged collect_fee outputs (feeCoinA and feeCoinB) into working coins');
     
-    // STEP 1: Merge close_position results FIRST - this is the BASE LIQUIDITY
-    // SAFE PATTERN: Only reference NestedResult indices when we know outputs exist
-    // close_position may return 0, 1, or 2 coins depending on position liquidity
+    // ============================================================================
+    // STEP 2: Conditionally merge close_position results (ONLY if position has liquidity)
+    // close_position returns (Coin<A>, Coin<B>) but ONLY if amounts > 0
+    // When position is out of range, one side may be 0 and the coin won't be returned
+    // We need to check position liquidity BEFORE destructuring to avoid SecondaryIndexOutOfBounds
+    // ============================================================================
     logger.debug(`  CHECK: close_position outputs - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
     if (positionHasLiquidity) {
       // Position has liquidity: close_position will return coins, safe to destructure and merge
       // Only NOW do we create the NestedResult references because we know they'll exist
+      logger.info('  Position has liquidity - merging close_position results');
       const [removedCoinA, removedCoinB] = closePositionResult;  // Safe: outputs exist when hasLiquidity=true
-      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA - BASE LIQUIDITY
-      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB - BASE LIQUIDITY
-      logger.info('  ✓ Merged close_position outputs (result[3][0] and result[3][1]) - BASE LIQUIDITY');
+      ptb.mergeCoins(workingCoinA, [removedCoinA]);  // Merge removed liquidity into working coinA
+      ptb.mergeCoins(workingCoinB, [removedCoinB]);  // Merge removed liquidity into working coinB
+      logger.info('  ✓ Merged close_position outputs (removedCoinA and removedCoinB) into working coins');
     } else {
       // Position has zero liquidity: close_position returns no coins, skip merge safely
       // DO NOT reference closePositionResult[0] or [1] - they don't exist
-      logger.warn('  ⚠ Skipped base liquidity merge: position has zero liquidity, close_position returns no coins');
+      logger.warn('  ⚠ Skipped close_position merge: position has zero liquidity, no coins returned');
     }
     
-    // STEP 2: Merge collect_fee results SECOND - these are OPTIONAL ADDITIONS
-    // CHECK: feeCoinA and feeCoinB from collect_fee INDIVIDUALLY
-    // These NestedResults (result[2][0] and result[2][1]) are optional additions to the base liquidity.
-    // Fee coins are merged as secondary additions, not as the primary liquidity source.
-    // Per @mysten/sui TransactionBlock pattern: guard each NestedResult independently
-    logger.debug(`  CHECK: Individual fee coins from collect_fee - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
-    
-    // Guard for feeCoinA (result[2][0]) - check if this specific NestedResult exists
-    if (positionHasLiquidity) {
-      // Position has liquidity: feeCoinA may exist, safe to merge
-      ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA - OPTIONAL ADDITION
-      logger.info('  ✓ Merged feeCoinA (result[2][0]) - OPTIONAL ADDITION from collect_fee');
-    } else {
-      // Position has zero liquidity: feeCoinA does not exist, skip merge safely
-      logger.warn('  ⚠ Skipped feeCoinA merge: NestedResult[2][0] does not exist (zero liquidity position)');
-    }
-    
-    // Guard for feeCoinB (result[2][1]) - check if this specific NestedResult exists
-    if (positionHasLiquidity) {
-      // Position has liquidity: feeCoinB may exist, safe to merge
-      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB - OPTIONAL ADDITION
-      logger.info('  ✓ Merged feeCoinB (result[2][1]) - OPTIONAL ADDITION from collect_fee');
-    } else {
-      // Position has zero liquidity: feeCoinB does not exist, skip merge safely
-      logger.warn('  ⚠ Skipped feeCoinB merge: NestedResult[2][1] does not exist (zero liquidity position)');
-    }
-    
-    logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
+    logger.info('  ✓ Merge complete: working coins ready for swap operations');
     
     // Step 4: Swap to optimal ratio if needed
     logger.info('Step 4: Swap to optimal ratio (if needed)');
@@ -295,8 +272,8 @@ export class RebalanceService {
       ptb,
       pool,
       newRange,
-      stableCoinA,
-      stableCoinB,
+      workingCoinA,
+      workingCoinB,
       packageId,
       globalConfigId,
       normalizedCoinTypeA,
