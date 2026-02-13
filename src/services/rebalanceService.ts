@@ -201,16 +201,16 @@ export class RebalanceService {
     logger.info('  ✓ Captured: removedCoinA (result[3][0]), removedCoinB (result[3][1]) - includes all liquidity');
     
     // ============================================================================
-    // Step 3: Merge removed liquidity with collected fees (CONDITIONAL)
-    // Only merge if feeCoin sources exist (handles zero-fee case)
+    // Step 3: Merge removed liquidity with collected fees
+    // PTB Note: feeCoin objects always exist even with zero balance
+    // mergeCoins handles zero-balance coins gracefully - merge operation is safe
     // mergeCoins(target: removedCoinA from close_position, sources: [feeCoinA from collect_fee])
     // mergeCoins(target: removedCoinB from close_position, sources: [feeCoinB from collect_fee])
     // ============================================================================
-    logger.info('Step 3: Merge coins (conditional on non-zero fees)');
+    logger.info('Step 3: Merge coins (handles zero-fee case gracefully)');
     
-    // Conditional merge for coinA: only merge if feeCoinA exists (non-zero)
-    // In PTB, feeCoinA always exists as an object reference, so we always merge
-    // If fees are zero, the merge still works (merges zero-balance coin into target)
+    // Merge for coinA: feeCoinA = result[2][0] into removedCoinA = result[3][0]
+    // Safe even if fees are zero - PTB mergeCoins handles zero-balance sources
     const sourcesA = [feeCoinA];  // feeCoinA = result[2][0]
     if (sourcesA.length > 0) {
       ptb.mergeCoins(removedCoinA, sourcesA);  // Command 4: Merge result[2][0] into result[3][0]
@@ -219,7 +219,8 @@ export class RebalanceService {
       logger.info('  ⊘ Skipped merge for coinA (no fee sources)');
     }
     
-    // Conditional merge for coinB: only merge if feeCoinB exists (non-zero)
+    // Merge for coinB: feeCoinB = result[2][1] into removedCoinB = result[3][1]
+    // Safe even if fees are zero - PTB mergeCoins handles zero-balance sources
     const sourcesB = [feeCoinB];  // feeCoinB = result[2][1]
     if (sourcesB.length > 0) {
       ptb.mergeCoins(removedCoinB, sourcesB);  // Command 5: Merge result[2][1] into result[3][1]
