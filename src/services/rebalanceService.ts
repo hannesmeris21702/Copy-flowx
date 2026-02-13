@@ -120,6 +120,11 @@ export class RebalanceService {
     logger.info('=== COIN OBJECT FLOW TRACE ===');
     logger.info('Order: create zero coins → collect_fee → close_position (removes liquidity) → merge → swap → open → add_liquidity → transfer');
     
+    // CHECK: Validate position liquidity before building PTB
+    // This allows us to determine if close_position will return coins
+    const positionHasLiquidity = BigInt(position.liquidity) > BigInt(0);
+    logger.info(`Position liquidity check: ${position.liquidity} (has liquidity: ${positionHasLiquidity})`);
+    
     // Get SDK configuration
     const packageId = sdk.sdkOptions.integrate.published_at;
     const globalConfigId = sdk.sdkOptions.clmm_pool.config!.global_config_id;
@@ -201,73 +206,85 @@ export class RebalanceService {
     logger.info('  ✓ Captured: removedCoinA (result[3][0]), removedCoinB (result[3][1]) - includes all liquidity');
     
     // ============================================================================
-    // Step 3: Verify prior command results and merge coins with fallback
-    // Verification: Check that collect_fee (result<1>) and close_position (result<2>) 
-    // returned valid results. If empty, use splitCoins fallback.
-    // PTB Note: In case of empty results at runtime, the splitCoins fallback ensures
-    // we have valid coin objects for mergeCoins operations.
-    // mergeCoins(target: removedCoinA from close_position, sources: [feeCoinA from collect_fee])
-    // mergeCoins(target: removedCoinB from close_position, sources: [feeCoinB from collect_fee])
+    // Step 3: Conditionally reference close_position results and merge coins safely
+    // 
+    // PROBLEM: close_position may return empty coins if position has zero liquidity.
+    // If NestedResult [3][0] or [3][1] is empty at runtime, mergeCoins will fail.
+    // 
+    // SOLUTION: Add explicit checks before constructing MergeCoins commands.
+    // For NestedResult that may be empty (close_position), verify existence before merge.
+    // If source/destination missing, skip the merge safely using official Sui patterns.
+    // 
+    // Official @mysten/sui Pattern:
+    // 1. Create stable coin references that always exist (splitCoins from zero coins)
+    // 2. Check if NestedResult sources exist before adding mergeCoins command
+    // 3. Only construct mergeCoins when both source and destination are guaranteed valid
+    // 4. For uncertain sources, use the stable reference directly without merging
     // ============================================================================
-    logger.info('Step 3: Merge coins with verification and fallback safety');
+    logger.info('Step 3: Conditionally reference close_position results and merge coins safely');
     
-    // In PTB, moveCall always returns TransactionObjectArgument references at build time.
-    // The actual validation happens at execution time. We structure the code to handle
-    // both normal cases (fees collected) and edge cases (zero fees) gracefully.
-    // Using verified coin references from collect_fee and close_position.
-    let finalFeeCoinA = feeCoinA;  // result[2][0] from collect_fee
-    let finalFeeCoinB = feeCoinB;  // result[2][1] from collect_fee
-    let finalRemovedCoinA = removedCoinA;  // result[3][0] from close_position
-    let finalRemovedCoinB = removedCoinB;  // result[3][1] from close_position
+    // Create stable coins using splitCoins with zero amounts
+    // These serve as guaranteed-valid coin references for downstream operations
+    const [stableCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create stable coinA reference
+    const [stableCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
+    logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
     
-    logger.debug('  Using collect_fee results: feeCoinA (result[2][0]), feeCoinB (result[2][1])');
-    logger.debug('  Using close_position results: removedCoinA (result[3][0]), removedCoinB (result[3][1])');
-    logger.info('  ✓ All prior command results captured (collect_fee, close_position)');
+    // ============================================================================
+    // EXPLICIT CHECK: Validate NestedResult exists before constructing MergeCoins
+    // 
+    // For close_position NestedResult [3][0] and [3][1]:
+    // - At build time, we check if position has liquidity
+    // - If liquidity > 0, close_position will return coins → safe to merge
+    // - If liquidity == 0, close_position returns empty → SKIP merge
+    // 
+    // Official @mysten/sui Pattern:
+    // Check conditions BEFORE adding commands to PTB, not at runtime
+    // Only construct mergeCoins when we know source will exist
+    // ============================================================================
     
-    // Merge for coinA: feeCoinA = result[2][0] into removedCoinA = result[3][0]
-    // Conditional merge with splitCoins fallback for robustness
-    const sourcesA = [finalFeeCoinA];  // feeCoinA = result[2][0]
-    if (sourcesA.length > 0) {
-      ptb.mergeCoins(finalRemovedCoinA, sourcesA);  // Command 4: Merge result[2][0] into result[3][0]
-      logger.info('  ✓ Merged feeCoinA (result[2][0]) into removedCoinA (result[3][0])');
+    // Merge collect_fee results into stable references
+    // CHECK: feeCoinA and feeCoinB are guaranteed to exist because:
+    // - collect_fee was called with zeroCoinA/B as inputs
+    // - Move function always returns Coin objects (may be zero balance, but exist)
+    // - NestedResult [2][0] and [2][1] are valid command outputs
+    logger.debug('  CHECK: feeCoinA (result[2][0]) and feeCoinB (result[2][1]) exist - collect_fee always returns coins');
+    // Source exists: safe to construct mergeCoins
+    ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA
+    ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB
+    logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
+    
+    // CHECK: removedCoinA and removedCoinB from close_position
+    // These NestedResults MAY be empty at runtime if position has zero liquidity
+    // Per problem statement: "If either side is missing, skip the merge safely"
+    // Solution: Check position.liquidity BEFORE constructing mergeCoins
+    logger.debug(`  CHECK: position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    if (positionHasLiquidity) {
+      // Position has liquidity: close_position will return coins, safe to construct mergeCoins
+      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA
+      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB
+      logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) into stable references');
     } else {
-      // Fallback: If no fee sources, create zero coin via splitCoins for safety
-      // This ensures PTB has valid coin objects even in edge cases
-      logger.warn('  ⚠ No fee sources for coinA, using splitCoins(removedCoinA, [u64(0)]) fallback');
-      ptb.splitCoins(finalRemovedCoinA, [ptb.pure.u64(0)]);
-      logger.info('  ✓ Created fallback via splitCoins(removedCoinA, [u64(0)])');
+      // Position has zero liquidity: close_position would return empty, skip merge safely
+      logger.warn('  ⚠ Skipped merge: position has zero liquidity, close_position would return empty coins');
     }
     
-    // Merge for coinB: feeCoinB = result[2][1] into removedCoinB = result[3][1]
-    // Conditional merge with splitCoins fallback for robustness
-    const sourcesB = [finalFeeCoinB];  // feeCoinB = result[2][1]
-    if (sourcesB.length > 0) {
-      ptb.mergeCoins(finalRemovedCoinB, sourcesB);  // Command 5: Merge result[2][1] into result[3][1]
-      logger.info('  ✓ Merged feeCoinB (result[2][1]) into removedCoinB (result[3][1])');
-    } else {
-      // Fallback: If no fee sources, create zero coin via splitCoins for safety
-      // This ensures PTB has valid coin objects even in edge cases
-      logger.warn('  ⚠ No fee sources for coinB, using splitCoins(removedCoinB, [u64(0)]) fallback');
-      ptb.splitCoins(finalRemovedCoinB, [ptb.pure.u64(0)]);
-      logger.info('  ✓ Created fallback via splitCoins(removedCoinB, [u64(0)])');
-    }
-    
-    logger.info('  ✓ Merge complete: finalRemovedCoinA, finalRemovedCoinB ready for next operations');
+    logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
     
     // Step 4: Swap to optimal ratio if needed
     logger.info('Step 4: Swap to optimal ratio (if needed)');
-    const { coinA: finalCoinA, coinB: finalCoinB } = this.addSwapIfNeeded(
+    const { coinA: swappedCoinA, coinB: swappedCoinB } = this.addSwapIfNeeded(
       ptb,
       pool,
       newRange,
-      finalRemovedCoinA,
-      finalRemovedCoinB,
+      stableCoinA,
+      stableCoinB,
       packageId,
       globalConfigId,
       normalizedCoinTypeA,
-      normalizedCoinTypeB
+      normalizedCoinTypeB,
+      positionHasLiquidity  // Pass this to help determine if we have coins to swap
     );
-    logger.info('  ✓ Final coins ready: finalCoinA, finalCoinB');
+    logger.info('  ✓ Final coins ready after swap: swappedCoinA, swappedCoinB');
     
     // Step 5: Open new position
     // Use SDK builder pattern with proper tick conversion from SDK's asUintN
@@ -291,7 +308,7 @@ export class RebalanceService {
     
     // Step 6: Add liquidity to new position
     // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-    logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
+    logger.info('Step 6: Add liquidity → consumes swappedCoinA, swappedCoinB');
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
@@ -300,8 +317,8 @@ export class RebalanceService {
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         newPosition,
-        finalCoinA,
-        finalCoinB,
+        swappedCoinA,
+        swappedCoinB,
         ptb.pure.u64(minAmountA.toString()),
         ptb.pure.u64(minAmountB.toString()),
         ptb.pure.bool(true), // fix_amount_a
@@ -334,7 +351,79 @@ export class RebalanceService {
     });
     console.log('=== END PTB COMMANDS ===');
     
+    // Validate NestedResult references before building PTB
+    // This ensures no NestedResult references a command result index that doesn't exist
+    this.validateNestedResultReferences(ptb);
+    
     return ptb;
+  }
+  
+  /**
+   * Validates that all NestedResult references in the PTB point to valid command indices.
+   * This prevents invalid PTB construction where a NestedResult references a command
+   * that doesn't exist or hasn't been executed yet.
+   * 
+   * @param ptb - The Transaction to validate
+   * @throws Error if any NestedResult references an invalid command index
+   */
+  private validateNestedResultReferences(ptb: Transaction): void {
+    const ptbData = ptb.getData();
+    const totalCommands = ptbData.commands.length;
+    
+    logger.debug(`Validating NestedResult references in PTB with ${totalCommands} commands`);
+    
+    // Helper function to recursively check for NestedResult in an object
+    const checkForNestedResult = (obj: unknown, currentCommandIdx: number, path: string = ''): void => {
+      if (!obj || typeof obj !== 'object') {
+        return;
+      }
+      
+      // Check if this is a NestedResult
+      if (typeof obj === 'object' && obj !== null && '$kind' in obj && obj.$kind === 'NestedResult' && 'NestedResult' in obj && Array.isArray(obj.NestedResult)) {
+        const [commandIndex, resultIndex] = obj.NestedResult;
+        
+        // Validate that the referenced command index exists and comes before current command
+        if (commandIndex < 0 || commandIndex >= totalCommands) {
+          throw new Error(
+            `Invalid NestedResult reference at ${path}: ` +
+            `references command ${commandIndex} but only ${totalCommands} commands exist. ` +
+            `NestedResult: [${commandIndex}, ${resultIndex}]`
+          );
+        }
+        
+        // Additional check: referenced command should come before the command using it
+        if (commandIndex >= currentCommandIdx) {
+          throw new Error(
+            `Invalid NestedResult reference at ${path}: ` +
+            `command ${currentCommandIdx} references future command ${commandIndex}. ` +
+            `NestedResult: [${commandIndex}, ${resultIndex}]`
+          );
+        }
+        
+        logger.debug(`  ✓ Valid NestedResult at ${path}: [${commandIndex}, ${resultIndex}]`);
+      }
+      
+      // Recursively check all properties
+      if (Array.isArray(obj)) {
+        obj.forEach((item, idx) => {
+          checkForNestedResult(item, currentCommandIdx, path ? `${path}[${idx}]` : `[${idx}]`);
+        });
+      } else {
+        Object.keys(obj).forEach(key => {
+          if (key !== '$kind') { // Skip the $kind marker
+            const value = (obj as Record<string, unknown>)[key];
+            checkForNestedResult(value, currentCommandIdx, path ? `${path}.${key}` : key);
+          }
+        });
+      }
+    };
+    
+    // Check each command for NestedResult references
+    ptbData.commands.forEach((cmd: unknown, idx: number) => {
+      checkForNestedResult(cmd, idx, `Command[${idx}]`);
+    });
+    
+    logger.info(`✓ PTB validation passed: all NestedResult references are valid`);
   }
   
   private addSwapIfNeeded(
@@ -346,7 +435,8 @@ export class RebalanceService {
     packageId: string,
     globalConfigId: string,
     normalizedCoinTypeA: string,
-    normalizedCoinTypeB: string
+    normalizedCoinTypeB: string,
+    positionHasLiquidity: boolean
   ): { coinA: TransactionObjectArgument; coinB: TransactionObjectArgument } {
     // Calculate optimal ratio for new range
     const sqrtPriceCurrent = BigInt(pool.currentSqrtPrice);
@@ -362,7 +452,17 @@ export class RebalanceService {
     
     if (sqrtPriceCurrent < sqrtPriceLower) {
       // Price below range - need token A, swap B to A
-      logger.info('  Price below new range - swapping ALL coinB to coinA');
+      logger.info('  Price below new range - need to swap coinB to coinA');
+      
+      // CHECK: Only perform swap if we have liquidity (and thus coins to swap)
+      // Per Cetus SDK pattern: don't call swap with zero amounts
+      // If position has no liquidity, we only have collect_fee coins (likely zero)
+      // In this case, skip the swap entirely to avoid referencing empty NestedResult
+      if (!positionHasLiquidity) {
+        logger.warn('  ⚠ Skipping swap: position has no liquidity, coins likely have zero balance');
+        logger.info('  Using coins as-is (no swap performed)');
+        return { coinA, coinB };
+      }
       
       const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
       
@@ -385,14 +485,23 @@ export class RebalanceService {
         ],
       });
       
+      // Swap was performed: reference the NestedResult output and merge
+      logger.debug('  Merging swap output (swappedCoinA) into coinA');
       ptb.mergeCoins(coinA, [swappedCoinA]);
-      logger.info('  ✓ Swapped: coinB consumed, output merged into coinA');
+      logger.info('  ✓ Swapped: coinB to coinA, output merged');
       
       return { coinA, coinB: remainderCoinB };
       
     } else if (sqrtPriceCurrent > sqrtPriceUpper) {
       // Price above range - need token B, swap A to B
-      logger.info('  Price above new range - swapping ALL coinA to coinB');
+      logger.info('  Price above new range - need to swap coinA to coinB');
+      
+      // CHECK: Only perform swap if we have liquidity (and thus coins to swap)
+      if (!positionHasLiquidity) {
+        logger.warn('  ⚠ Skipping swap: position has no liquidity, coins likely have zero balance');
+        logger.info('  Using coins as-is (no swap performed)');
+        return { coinA, coinB };
+      }
       
       const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
       
@@ -415,14 +524,16 @@ export class RebalanceService {
         ],
       });
       
+      // Swap was performed: reference the NestedResult output and merge
+      logger.debug('  Merging swap output (swappedCoinB) into coinB');
       ptb.mergeCoins(coinB, [swappedCoinB]);
-      logger.info('  ✓ Swapped: coinA consumed, output merged into coinB');
+      logger.info('  ✓ Swapped: coinA to coinB, output merged');
       
       return { coinA: remainderCoinA, coinB };
       
     } else {
       // Price in range - use both tokens as-is
-      logger.info('  Price in new range - using both coins as-is');
+      logger.info('  Price in new range - using both coins as-is (no swap needed)');
       return { coinA, coinB };
     }
   }
