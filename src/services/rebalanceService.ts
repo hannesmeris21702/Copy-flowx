@@ -192,7 +192,7 @@ export class RebalanceService {
     // Step 2: Close position (removes liquidity AND closes position NFT)
     // Use SDK builder pattern: pool_script::close_position
     // IMPORTANT: Called for SIDE EFFECTS ONLY - outputs are NOT used
-    // All liquidity comes from coinWithBalance intents
+    // All liquidity comes from zero coin references (Commands 0-1)
     // ============================================================================
     logger.info('Step 2: Close position (removes liquidity & closes NFT) → called for side effects only');
     
@@ -224,7 +224,7 @@ export class RebalanceService {
     // - Transaction succeeds even if collect_fee or close_position return 0 coins
     // 
     // Official @mysten/sui Pattern:
-    // 1. Create zero coins upfront using coinWithBalance intents
+    // 1. Create zero-value coin objects upfront using coinWithBalance
     // 2. Split zero coins to create stable coin references for downstream operations
     // 3. Use stable coins directly for swap and add_liquidity operations
     // 4. No conditional merging - all liquidity flows through zero coin references
