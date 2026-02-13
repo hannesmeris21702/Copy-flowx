@@ -232,40 +232,55 @@ export class RebalanceService {
     // ============================================================================
     // EXPLICIT CHECK: Validate NestedResult exists before constructing MergeCoins
     // 
-    // For close_position NestedResult [3][0] and [3][1]:
-    // - At build time, we check if position has liquidity
-    // - If liquidity > 0, close_position will return coins → safe to merge
-    // - If liquidity == 0, close_position returns empty → SKIP merge
+    // LIQUIDITY DERIVATION ORDER (per requirements):
+    // 1. PRIMARY SOURCE: close_position results (base liquidity for new position)
+    // 2. SECONDARY SOURCE: collect_fee results (optional additions only)
     // 
     // Official @mysten/sui Pattern:
     // Check conditions BEFORE adding commands to PTB, not at runtime
     // Only construct mergeCoins when we know source will exist
     // ============================================================================
     
-    // Merge collect_fee results into stable references
-    // CHECK: feeCoinA and feeCoinB are guaranteed to exist because:
-    // - collect_fee was called with zeroCoinA/B as inputs
-    // - Move function always returns Coin objects (may be zero balance, but exist)
-    // - NestedResult [2][0] and [2][1] are valid command outputs
-    logger.debug('  CHECK: feeCoinA (result[2][0]) and feeCoinB (result[2][1]) exist - collect_fee always returns coins');
-    // Source exists: safe to construct mergeCoins
-    ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA
-    ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB
-    logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
-    
+    // STEP 1: Merge close_position results FIRST - this is the BASE LIQUIDITY
     // CHECK: removedCoinA and removedCoinB from close_position
-    // These NestedResults MAY be empty at runtime if position has zero liquidity
-    // Per problem statement: "If either side is missing, skip the merge safely"
-    // Solution: Check position.liquidity BEFORE constructing mergeCoins
-    logger.debug(`  CHECK: position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    // These NestedResults (result[3][0] and result[3][1]) form the primary liquidity source
+    // for the new position. Always merge these first to establish base liquidity.
+    logger.debug(`  CHECK: removedCoinA (result[3][0]) and removedCoinB (result[3][1]) - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
     if (positionHasLiquidity) {
       // Position has liquidity: close_position will return coins, safe to construct mergeCoins
-      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA
-      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB
-      logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) into stable references');
+      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA - BASE LIQUIDITY
+      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB - BASE LIQUIDITY
+      logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) - BASE LIQUIDITY from close_position');
     } else {
       // Position has zero liquidity: close_position would return empty, skip merge safely
-      logger.warn('  ⚠ Skipped merge: position has zero liquidity, close_position would return empty coins');
+      logger.warn('  ⚠ Skipped base liquidity merge: position has zero liquidity, close_position would return empty coins');
+    }
+    
+    // STEP 2: Merge collect_fee results SECOND - these are OPTIONAL ADDITIONS
+    // CHECK: feeCoinA and feeCoinB from collect_fee INDIVIDUALLY
+    // These NestedResults (result[2][0] and result[2][1]) are optional additions to the base liquidity.
+    // Fee coins are merged as secondary additions, not as the primary liquidity source.
+    // Per @mysten/sui TransactionBlock pattern: guard each NestedResult independently
+    logger.debug(`  CHECK: Individual fee coins from collect_fee - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    
+    // Guard for feeCoinA (result[2][0]) - check if this specific NestedResult exists
+    if (positionHasLiquidity) {
+      // Position has liquidity: feeCoinA may exist, safe to merge
+      ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA - OPTIONAL ADDITION
+      logger.info('  ✓ Merged feeCoinA (result[2][0]) - OPTIONAL ADDITION from collect_fee');
+    } else {
+      // Position has zero liquidity: feeCoinA does not exist, skip merge safely
+      logger.warn('  ⚠ Skipped feeCoinA merge: NestedResult[2][0] does not exist (zero liquidity position)');
+    }
+    
+    // Guard for feeCoinB (result[2][1]) - check if this specific NestedResult exists
+    if (positionHasLiquidity) {
+      // Position has liquidity: feeCoinB may exist, safe to merge
+      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB - OPTIONAL ADDITION
+      logger.info('  ✓ Merged feeCoinB (result[2][1]) - OPTIONAL ADDITION from collect_fee');
+    } else {
+      // Position has zero liquidity: feeCoinB does not exist, skip merge safely
+      logger.warn('  ⚠ Skipped feeCoinB merge: NestedResult[2][1] does not exist (zero liquidity position)');
     }
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
@@ -355,6 +370,11 @@ export class RebalanceService {
     // This ensures no NestedResult references a command result index that doesn't exist
     this.validateNestedResultReferences(ptb);
     
+    // Validate MergeCoins references to collect_fee results
+    // This prevents invalid PTB construction where MergeCoins references collect_fee
+    // results that may not exist
+    this.validateCollectFeeMergeCoins(ptb, positionHasLiquidity);
+    
     return ptb;
   }
   
@@ -426,6 +446,90 @@ export class RebalanceService {
     logger.info(`✓ PTB validation passed: all NestedResult references are valid`);
   }
   
+  /**
+   * Validates that MergeCoins commands do not reference collect_fee results unless they exist.
+   * This prevents invalid PTB construction where MergeCoins tries to merge fee coins that
+   * were not actually returned by collect_fee (e.g., when position has zero liquidity).
+   * 
+   * @param ptb - The Transaction to validate
+   * @param positionHasLiquidity - Whether the position has liquidity (determines if fee coins exist)
+   * @throws Error if MergeCoins references collect_fee results when they shouldn't exist
+   */
+  private validateCollectFeeMergeCoins(ptb: Transaction, positionHasLiquidity: boolean): void {
+    const ptbData = ptb.getData();
+    
+    // Dynamically find the collect_fee command by searching for the moveCall
+    // This is more robust than hardcoding the index
+    let collectFeeCommandIndex = -1;
+    ptbData.commands.forEach((cmd: unknown, idx: number) => {
+      if (typeof cmd === 'object' && cmd !== null && '$kind' in cmd && cmd.$kind === 'MoveCall') {
+        const moveCallData = (cmd as any).MoveCall;
+        if (moveCallData?.target?.includes('collect_fee')) {
+          collectFeeCommandIndex = idx;
+        }
+      }
+    });
+    
+    // If no collect_fee command found, no validation needed
+    if (collectFeeCommandIndex === -1) {
+      logger.debug('No collect_fee command found in PTB, skipping validation');
+      return;
+    }
+    
+    logger.debug(`Validating MergeCoins references to collect_fee results (command ${collectFeeCommandIndex})`);
+    logger.debug(`Position has liquidity: ${positionHasLiquidity}`);
+    
+    // Helper function to check if an argument references collect_fee results
+    const referencesCollectFee = (arg: unknown): boolean => {
+      if (!arg || typeof arg !== 'object') {
+        return false;
+      }
+      
+      // Check if this is a NestedResult referencing collect_fee command
+      if ('$kind' in arg && arg.$kind === 'NestedResult' && 'NestedResult' in arg && Array.isArray(arg.NestedResult)) {
+        const [commandIndex] = arg.NestedResult;
+        return commandIndex === collectFeeCommandIndex;
+      }
+      
+      // Recursively check arrays and objects
+      if (Array.isArray(arg)) {
+        return arg.some(item => referencesCollectFee(item));
+      }
+      
+      return Object.values(arg).some(value => referencesCollectFee(value));
+    };
+    
+    // Check each command for MergeCoins referencing collect_fee
+    ptbData.commands.forEach((cmd: unknown, idx: number) => {
+      // Check if this is a MergeCoins command
+      if (typeof cmd === 'object' && cmd !== null && '$kind' in cmd && cmd.$kind === 'MergeCoins') {
+        const mergeCoinsData = (cmd as any).MergeCoins;
+        const sources = mergeCoinsData?.sources || [];
+        
+        // Check if any source references collect_fee results
+        const hasCollectFeeReference = sources.some((source: unknown) => referencesCollectFee(source));
+        
+        if (hasCollectFeeReference) {
+          logger.debug(`  Command ${idx} (MergeCoins) references collect_fee results`);
+          
+          // If position has no liquidity, MergeCoins should not reference collect_fee
+          if (!positionHasLiquidity) {
+            throw new Error(
+              `Invalid PTB construction: MergeCoins at command ${idx} references ` +
+              `collect_fee results (command ${collectFeeCommandIndex}), but position has zero liquidity. ` +
+              `Fee coins do not exist and cannot be merged. ` +
+              `This indicates a bug in the conditional guards.`
+            );
+          }
+          
+          logger.debug(`  ✓ Valid: MergeCoins references collect_fee and position has liquidity`);
+        }
+      }
+    });
+    
+    logger.info(`✓ MergeCoins validation passed: no invalid references to collect_fee results`);
+  }
+  
   private addSwapIfNeeded(
     ptb: Transaction,
     pool: Pool,
@@ -488,9 +592,11 @@ export class RebalanceService {
       // Swap was performed: reference the NestedResult output and merge
       logger.debug('  Merging swap output (swappedCoinA) into coinA');
       ptb.mergeCoins(coinA, [swappedCoinA]);
-      logger.info('  ✓ Swapped: coinB to coinA, output merged');
+      logger.debug('  Merging swap remainder (remainderCoinB) into coinB');
+      ptb.mergeCoins(coinB, [remainderCoinB]);
+      logger.info('  ✓ Swapped: coinB to coinA, output and remainder merged into stable coins');
       
-      return { coinA, coinB: remainderCoinB };
+      return { coinA, coinB };
       
     } else if (sqrtPriceCurrent > sqrtPriceUpper) {
       // Price above range - need token B, swap A to B
@@ -527,9 +633,11 @@ export class RebalanceService {
       // Swap was performed: reference the NestedResult output and merge
       logger.debug('  Merging swap output (swappedCoinB) into coinB');
       ptb.mergeCoins(coinB, [swappedCoinB]);
-      logger.info('  ✓ Swapped: coinA to coinB, output merged');
+      logger.debug('  Merging swap remainder (remainderCoinA) into coinA');
+      ptb.mergeCoins(coinA, [remainderCoinA]);
+      logger.info('  ✓ Swapped: coinA to coinB, output and remainder merged into stable coins');
       
-      return { coinA: remainderCoinA, coinB };
+      return { coinA, coinB };
       
     } else {
       // Price in range - use both tokens as-is
