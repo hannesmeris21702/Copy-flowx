@@ -118,7 +118,7 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: create zero coins → collect_fee → close_position (removes liquidity) → create placeholders → merge fees (always) → merge liquidity (if exists) → swap → open → add_liquidity → transfer');
+    logger.info('Order: create zero coins → collect_fee → close_position (side effect only) → create placeholders → merge ONLY fees → swap → open → add_liquidity → transfer');
     
     // CHECK: Validate position liquidity before building PTB
     // This allows us to determine if close_position will return coins
@@ -183,15 +183,15 @@ export class RebalanceService {
     // ============================================================================
     // Step 2: Close position (removes liquidity AND closes position NFT)
     // Use SDK builder pattern: pool_script::close_position
-    // May return variable outputs: [Coin<A>, Coin<B>], [Coin<A>], [Coin<B>], or []
-    // depending on position liquidity and which side has balance
+    // CRITICAL: We do NOT capture the result - close_position is called ONLY for side effects
+    // Sui PTB: close_position may return 0 coins, making ANY NestedResult reference invalid
     // ============================================================================
-    logger.info('Step 2: Close position (removes liquidity & closes NFT) → may return 0-2 coins');
+    logger.info('Step 2: Close position (removes liquidity & closes NFT) → side effect only, NO result capture');
     
-    // Command 3: close_position moveCall
-    // May return [Coin<A>, Coin<B>], [Coin<A>], [Coin<B>], or [] depending on liquidity
-    // DO NOT destructure immediately - handle conditionally based on position liquidity
-    const closePositionResult = ptb.moveCall({
+    // Command 3: close_position moveCall - NO RESULT CAPTURE
+    // Call for side effects ONLY: removes liquidity and closes/burns the position NFT
+    // Do NOT store the result in a variable - this prevents ANY NestedResult references
+    ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
@@ -203,26 +203,24 @@ export class RebalanceService {
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
-    // NOTE: closePositionResult is NOT destructured here to avoid SecondaryIndexOutOfBounds
-    // We'll conditionally reference indices only when we know outputs exist
-    logger.info('  ✓ close_position called (outputs will be conditionally referenced)');
+    // Result is intentionally NOT captured - prevents SecondaryIndexOutOfBounds errors
+    logger.info('  ✓ close_position called for side effects only (NO result references)');
     
     // ============================================================================
-    // Step 3: Create placeholder coins and merge safely
+    // Step 3: Create placeholder coins and merge ONLY collect_fee results
     // 
-    // IMPORTANT DISTINCTION:
-    // - collect_fee ALWAYS returns coins (even if amounts are 0), so can be merged unconditionally
-    // - close_position returns coins ONLY if amounts > 0, so must be merged conditionally
-    // 
-    // When position is out of range, one side of close_position may be 0 and won't be returned.
-    // We handle this by checking position liquidity before destructuring close_position results.
+    // CRITICAL REQUIREMENT:
+    // - close_position is called ONLY for side effects (NO result references)
+    // - Use ONLY collect_fee outputs as coin sources for rebalancing
+    // - collect_fee ALWAYS returns coins (even if amounts are 0)
+    // - NEVER reference close_position results (prevents SecondaryIndexOutOfBounds)
     // 
     // Official @mysten/sui Pattern:
     // 1. Create stable coin references that always exist (splitCoins from zero coins)
-    // 2. Merge collect_fee results unconditionally (they always exist)
-    // 3. Conditionally merge close_position results only when position has liquidity
+    // 2. Merge ONLY collect_fee results (they always exist and are our liquidity source)
+    // 3. NEVER reference close_position outputs (even conditionally)
     // ============================================================================
-    logger.info('Step 3: Create placeholder coins and merge fees and liquidity safely');
+    logger.info('Step 3: Create placeholder coins and merge ONLY collect_fee results');
     
     // Create placeholder coins using splitCoins with zero amounts
     // These serve as guaranteed-valid coin references for downstream operations
@@ -235,34 +233,14 @@ export class RebalanceService {
     let workingCoinB = placeholderB;
     
     // ============================================================================
-    // STEP 1: Merge collect_fee results FIRST (ALWAYS - fees always returned)
-    // collect_fee returns coins even if the fee amounts are 0, so these can always be safely merged
+    // Merge collect_fee results as our ONLY liquidity source
+    // collect_fee returns coins even if the fee amounts are 0, so always safe to merge
+    // These fee coins are our entire liquidity source for rebalancing
     // ============================================================================
-    logger.info('  Merging collect_fee results (always safe - fees always returned even if 0)');
+    logger.info('  Merging collect_fee results (our ONLY liquidity source)');
     ptb.mergeCoins(workingCoinA, [feeCoinA]);  // Always safe: collect_fee always returns feeCoinA
     ptb.mergeCoins(workingCoinB, [feeCoinB]);  // Always safe: collect_fee always returns feeCoinB
-    logger.info('  ✓ Merged collect_fee outputs (feeCoinA and feeCoinB) into working coins');
-    
-    // ============================================================================
-    // STEP 2: Conditionally merge close_position results (ONLY if position has liquidity)
-    // close_position returns (Coin<A>, Coin<B>) but ONLY if amounts > 0
-    // When position is out of range, one side may be 0 and the coin won't be returned
-    // We need to check position liquidity BEFORE destructuring to avoid SecondaryIndexOutOfBounds
-    // ============================================================================
-    logger.debug(`  CHECK: close_position outputs - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
-    if (positionHasLiquidity) {
-      // Position has liquidity: close_position will return coins, safe to destructure and merge
-      // Only NOW do we create the NestedResult references because we know they'll exist
-      logger.info('  Position has liquidity - merging close_position results');
-      const [removedCoinA, removedCoinB] = closePositionResult;  // Safe: outputs exist when hasLiquidity=true
-      ptb.mergeCoins(workingCoinA, [removedCoinA]);  // Merge removed liquidity into working coinA
-      ptb.mergeCoins(workingCoinB, [removedCoinB]);  // Merge removed liquidity into working coinB
-      logger.info('  ✓ Merged close_position outputs (removedCoinA and removedCoinB) into working coins');
-    } else {
-      // Position has zero liquidity: close_position returns no coins, skip merge safely
-      // DO NOT reference closePositionResult[0] or [1] - they don't exist
-      logger.warn('  ⚠ Skipped close_position merge: position has zero liquidity, no coins returned');
-    }
+    logger.info('  ✓ Merged collect_fee outputs into working coins (NO close_position references)');
     
     logger.info('  ✓ Merge complete: working coins ready for swap operations');
     
