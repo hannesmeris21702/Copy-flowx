@@ -187,9 +187,11 @@ export class RebalanceService {
     logger.info('  ✓ Captured: removedCoinA, removedCoinB (includes all liquidity)');
     
     // Step 3: Merge removed liquidity with collected fees
+    // mergeCoins(target: removedCoinA from close_position, sources: [feeCoinA from collect_fee])
+    // mergeCoins(target: removedCoinB from close_position, sources: [feeCoinB from collect_fee])
     logger.info('Step 3: Merge coins');
-    ptb.mergeCoins(removedCoinA, [feeCoinA]);
-    ptb.mergeCoins(removedCoinB, [feeCoinB]);
+    ptb.mergeCoins(removedCoinA, [feeCoinA]); // Merge feeCoinA (result[2][0]) into removedCoinA (result[3][0])
+    ptb.mergeCoins(removedCoinB, [feeCoinB]); // Merge feeCoinB (result[2][1]) into removedCoinB (result[3][1])
     logger.info('  ✓ After merge: removedCoinA, removedCoinB contain all funds');
     
     // Step 4: Swap to optimal ratio if needed
@@ -258,6 +260,7 @@ export class RebalanceService {
     logger.info('NO COIN OBJECTS DROPPED OR UNTRANSFERRED');
     
     // Add PTB validation: Print commands before build (as requested in problem statement)
+    // Using console.log (not logger) for direct output as specified in requirements
     const ptbData = ptb.getData();
     console.log('=== PTB COMMANDS VALIDATION ===');
     console.log(`Total commands: ${ptbData.commands.length}`);
