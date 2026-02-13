@@ -351,7 +351,78 @@ export class RebalanceService {
     });
     console.log('=== END PTB COMMANDS ===');
     
+    // Validate NestedResult references before building PTB
+    // This ensures no NestedResult references a command result index that doesn't exist
+    this.validateNestedResultReferences(ptb);
+    
     return ptb;
+  }
+  
+  /**
+   * Validates that all NestedResult references in the PTB point to valid command indices.
+   * This prevents invalid PTB construction where a NestedResult references a command
+   * that doesn't exist or hasn't been executed yet.
+   * 
+   * @param ptb - The Transaction to validate
+   * @throws Error if any NestedResult references an invalid command index
+   */
+  private validateNestedResultReferences(ptb: Transaction): void {
+    const ptbData = ptb.getData();
+    const totalCommands = ptbData.commands.length;
+    
+    logger.debug(`Validating NestedResult references in PTB with ${totalCommands} commands`);
+    
+    // Helper function to recursively check for NestedResult in an object
+    const checkForNestedResult = (obj: any, currentCommandIdx: number, path: string = ''): void => {
+      if (!obj || typeof obj !== 'object') {
+        return;
+      }
+      
+      // Check if this is a NestedResult
+      if (obj.$kind === 'NestedResult' && Array.isArray(obj.NestedResult)) {
+        const [commandIndex, resultIndex] = obj.NestedResult;
+        
+        // Validate that the referenced command index exists and comes before current command
+        if (commandIndex < 0 || commandIndex >= totalCommands) {
+          throw new Error(
+            `Invalid NestedResult reference at ${path}: ` +
+            `references command ${commandIndex} but only ${totalCommands} commands exist. ` +
+            `NestedResult: [${commandIndex}, ${resultIndex}]`
+          );
+        }
+        
+        // Additional check: referenced command should come before the command using it
+        if (commandIndex >= currentCommandIdx) {
+          throw new Error(
+            `Invalid NestedResult reference at ${path}: ` +
+            `command ${currentCommandIdx} references future command ${commandIndex}. ` +
+            `NestedResult: [${commandIndex}, ${resultIndex}]`
+          );
+        }
+        
+        logger.debug(`  ✓ Valid NestedResult at ${path}: [${commandIndex}, ${resultIndex}]`);
+      }
+      
+      // Recursively check all properties
+      if (Array.isArray(obj)) {
+        obj.forEach((item, idx) => {
+          checkForNestedResult(item, currentCommandIdx, `${path}[${idx}]`);
+        });
+      } else {
+        Object.keys(obj).forEach(key => {
+          if (key !== '$kind') { // Skip the $kind marker
+            checkForNestedResult(obj[key], currentCommandIdx, path ? `${path}.${key}` : key);
+          }
+        });
+      }
+    };
+    
+    // Check each command for NestedResult references
+    ptbData.commands.forEach((cmd: any, idx: number) => {
+      checkForNestedResult(cmd, idx, `Command[${idx}]`);
+    });
+    
+    logger.info(`✓ PTB validation passed: all NestedResult references are valid`);
   }
   
   private addSwapIfNeeded(
