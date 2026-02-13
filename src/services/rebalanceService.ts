@@ -140,39 +140,52 @@ export class RebalanceService {
     }
     logger.debug('Type argument validation passed');
     
-    // Create zero coins upfront (before any moveCall operations)
+    // ============================================================================
+    // COIN TRACE: PTB Command Flow with Explicit Result Labels
+    // ============================================================================
+    // Command 0-1: Create zero coins upfront (before any moveCall operations)
     // This ensures proper command indexing for all subsequent operations
     // Using coinWithBalance ensures valid CoinObjects even with zero balance
     logger.info('Creating zero-balance coins for transaction operations...');
-    const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
-    const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
-    logger.info('  ✓ Zero coins created');
+    const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);  // Command 0: zeroCoinA
+    const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);  // Command 1: zeroCoinB
+    logger.info('  ✓ Zero coins created (Command 0-1)');
     
+    // ============================================================================
     // Step 1: Collect fees from old position FIRST (before closing)
     // This is the correct order per Cetus SDK pattern
     // Use SDK builder pattern: pool_script_v2::collect_fee
     // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
+    // ============================================================================
     logger.info('Step 1: Collect fees → returns [feeCoinA, feeCoinB]');
     
-    const [feeCoinA, feeCoinB] = ptb.moveCall({
+    // Command 2: collect_fee moveCall - Returns tuple [Coin<A>, Coin<B>]
+    // collectFeeResult[0] = feeCoinA, collectFeeResult[1] = feeCoinB
+    const collectFeeResult = ptb.moveCall({
       target: `${packageId}::pool_script_v2::collect_fee`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         ptb.object(position.id),
-        zeroCoinA,
-        zeroCoinB,
+        zeroCoinA,  // Using Command 0
+        zeroCoinB,  // Using Command 1
       ],
     });
-    logger.info('  ✓ Captured: feeCoinA, feeCoinB');
+    const [feeCoinA, feeCoinB] = collectFeeResult;  // Destructure: feeCoinA = result[2][0], feeCoinB = result[2][1]
+    logger.info('  ✓ Captured: feeCoinA (result[2][0]), feeCoinB (result[2][1])');
     
+    // ============================================================================
     // Step 2: Close position (removes liquidity AND closes position NFT)
     // Use SDK builder pattern: pool_script::close_position
     // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
     // This replaces the separate remove_liquidity + close_position pattern
+    // ============================================================================
     logger.info('Step 2: Close position (removes liquidity & closes NFT) → returns [coinA, coinB]');
-    const [removedCoinA, removedCoinB] = ptb.moveCall({
+    
+    // Command 3: close_position moveCall - Returns tuple [Coin<A>, Coin<B>]
+    // closePositionResult[0] = removedCoinA, closePositionResult[1] = removedCoinB
+    const closePositionResult = ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
@@ -184,15 +197,38 @@ export class RebalanceService {
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
-    logger.info('  ✓ Captured: removedCoinA, removedCoinB (includes all liquidity)');
+    const [removedCoinA, removedCoinB] = closePositionResult;  // Destructure: removedCoinA = result[3][0], removedCoinB = result[3][1]
+    logger.info('  ✓ Captured: removedCoinA (result[3][0]), removedCoinB (result[3][1]) - includes all liquidity');
     
-    // Step 3: Merge removed liquidity with collected fees
+    // ============================================================================
+    // Step 3: Merge removed liquidity with collected fees (CONDITIONAL)
+    // Only merge if feeCoin sources exist (handles zero-fee case)
     // mergeCoins(target: removedCoinA from close_position, sources: [feeCoinA from collect_fee])
     // mergeCoins(target: removedCoinB from close_position, sources: [feeCoinB from collect_fee])
-    logger.info('Step 3: Merge coins');
-    ptb.mergeCoins(removedCoinA, [feeCoinA]); // Merge feeCoinA (result[2][0]) into removedCoinA (result[3][0])
-    ptb.mergeCoins(removedCoinB, [feeCoinB]); // Merge feeCoinB (result[2][1]) into removedCoinB (result[3][1])
-    logger.info('  ✓ After merge: removedCoinA, removedCoinB contain all funds');
+    // ============================================================================
+    logger.info('Step 3: Merge coins (conditional on non-zero fees)');
+    
+    // Conditional merge for coinA: only merge if feeCoinA exists (non-zero)
+    // In PTB, feeCoinA always exists as an object reference, so we always merge
+    // If fees are zero, the merge still works (merges zero-balance coin into target)
+    const sourcesA = [feeCoinA];  // feeCoinA = result[2][0]
+    if (sourcesA.length > 0) {
+      ptb.mergeCoins(removedCoinA, sourcesA);  // Command 4: Merge result[2][0] into result[3][0]
+      logger.info('  ✓ Merged feeCoinA (result[2][0]) into removedCoinA (result[3][0])');
+    } else {
+      logger.info('  ⊘ Skipped merge for coinA (no fee sources)');
+    }
+    
+    // Conditional merge for coinB: only merge if feeCoinB exists (non-zero)
+    const sourcesB = [feeCoinB];  // feeCoinB = result[2][1]
+    if (sourcesB.length > 0) {
+      ptb.mergeCoins(removedCoinB, sourcesB);  // Command 5: Merge result[2][1] into result[3][1]
+      logger.info('  ✓ Merged feeCoinB (result[2][1]) into removedCoinB (result[3][1])');
+    } else {
+      logger.info('  ⊘ Skipped merge for coinB (no fee sources)');
+    }
+    
+    logger.info('  ✓ After merge: removedCoinA, removedCoinB contain all funds (liquidity + fees)');
     
     // Step 4: Swap to optimal ratio if needed
     logger.info('Step 4: Swap to optimal ratio (if needed)');
