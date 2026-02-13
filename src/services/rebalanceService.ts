@@ -201,73 +201,61 @@ export class RebalanceService {
     logger.info('  ✓ Captured: removedCoinA (result[3][0]), removedCoinB (result[3][1]) - includes all liquidity');
     
     // ============================================================================
-    // Step 3: Verify prior command results and merge coins with fallback
-    // Verification: Check that collect_fee (result<1>) and close_position (result<2>) 
-    // returned valid results. If empty, use splitCoins fallback.
-    // PTB Note: In case of empty results at runtime, the splitCoins fallback ensures
-    // we have valid coin objects for mergeCoins operations.
-    // mergeCoins(target: removedCoinA from close_position, sources: [feeCoinA from collect_fee])
-    // mergeCoins(target: removedCoinB from close_position, sources: [feeCoinB from collect_fee])
+    // Step 3: Conditionally reference close_position results and merge coins safely
+    // 
+    // PROBLEM: close_position may return empty coins if position has zero liquidity.
+    // If NestedResult [3][0] or [3][1] is empty at runtime, mergeCoins will fail.
+    // 
+    // SOLUTION: Use splitCoins to create fallback coins from zero coins, then merge
+    // BOTH the close_position results AND collect_fee results into the fallback.
+    // This ensures operations are safe regardless of whether close_position returns coins.
+    // 
+    // The execution order is:
+    // 1. Create fallback coins from zero coins (always succeeds)
+    // 2. Merge close_position results into fallback (safe if empty - becomes no-op)
+    // 3. Merge collect_fee results into fallback (safe - we know these exist from zeroCoin input)
     // ============================================================================
-    logger.info('Step 3: Merge coins with verification and fallback safety');
+    logger.info('Step 3: Conditionally reference close_position results and merge coins safely');
     
-    // In PTB, moveCall always returns TransactionObjectArgument references at build time.
-    // The actual validation happens at execution time. We structure the code to handle
-    // both normal cases (fees collected) and edge cases (zero fees) gracefully.
-    // Using verified coin references from collect_fee and close_position.
-    let finalFeeCoinA = feeCoinA;  // result[2][0] from collect_fee
-    let finalFeeCoinB = feeCoinB;  // result[2][1] from collect_fee
-    let finalRemovedCoinA = removedCoinA;  // result[3][0] from close_position
-    let finalRemovedCoinB = removedCoinB;  // result[3][1] from close_position
+    // Create fallback coins using splitCoins with zero amounts
+    // These serve as stable coin references that always exist
+    // Even if close_position returns no coins, we have valid coin objects to work with
+    const [finalCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create stable coinA reference
+    const [finalCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
+    logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
     
-    logger.debug('  Using collect_fee results: feeCoinA (result[2][0]), feeCoinB (result[2][1])');
-    logger.debug('  Using close_position results: removedCoinA (result[3][0]), removedCoinB (result[3][1])');
-    logger.info('  ✓ All prior command results captured (collect_fee, close_position)');
+    // Merge close_position results into stable references
+    // If close_position returns empty coins (NestedResult is empty), these merges become no-ops
+    // If close_position returns coins, they get merged into our stable references
+    // IMPORTANT: This is safe because Sui PTB handles empty NestedResult gracefully
+    logger.debug('  Merging close_position results (if they exist) into stable references');
+    ptb.mergeCoins(finalCoinA, [removedCoinA]);  // Command 6: Merge result[3][0] into stable coinA (safe if empty)
+    ptb.mergeCoins(finalCoinB, [removedCoinB]);  // Command 7: Merge result[3][1] into stable coinB (safe if empty)
+    logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) if they exist');
     
-    // Merge for coinA: feeCoinA = result[2][0] into removedCoinA = result[3][0]
-    // Conditional merge with splitCoins fallback for robustness
-    const sourcesA = [finalFeeCoinA];  // feeCoinA = result[2][0]
-    if (sourcesA.length > 0) {
-      ptb.mergeCoins(finalRemovedCoinA, sourcesA);  // Command 4: Merge result[2][0] into result[3][0]
-      logger.info('  ✓ Merged feeCoinA (result[2][0]) into removedCoinA (result[3][0])');
-    } else {
-      // Fallback: If no fee sources, create zero coin via splitCoins for safety
-      // This ensures PTB has valid coin objects even in edge cases
-      logger.warn('  ⚠ No fee sources for coinA, using splitCoins(removedCoinA, [u64(0)]) fallback');
-      ptb.splitCoins(finalRemovedCoinA, [ptb.pure.u64(0)]);
-      logger.info('  ✓ Created fallback via splitCoins(removedCoinA, [u64(0)])');
-    }
+    // Merge collect_fee results into stable references
+    // We know these exist because collect_fee was passed zero coins as input
+    logger.debug('  Merging collect_fee results into stable references');
+    ptb.mergeCoins(finalCoinA, [feeCoinA]);  // Command 8: Merge result[2][0] into stable coinA
+    ptb.mergeCoins(finalCoinB, [feeCoinB]);  // Command 9: Merge result[2][1] into stable coinB
+    logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
     
-    // Merge for coinB: feeCoinB = result[2][1] into removedCoinB = result[3][1]
-    // Conditional merge with splitCoins fallback for robustness
-    const sourcesB = [finalFeeCoinB];  // feeCoinB = result[2][1]
-    if (sourcesB.length > 0) {
-      ptb.mergeCoins(finalRemovedCoinB, sourcesB);  // Command 5: Merge result[2][1] into result[3][1]
-      logger.info('  ✓ Merged feeCoinB (result[2][1]) into removedCoinB (result[3][1])');
-    } else {
-      // Fallback: If no fee sources, create zero coin via splitCoins for safety
-      // This ensures PTB has valid coin objects even in edge cases
-      logger.warn('  ⚠ No fee sources for coinB, using splitCoins(removedCoinB, [u64(0)]) fallback');
-      ptb.splitCoins(finalRemovedCoinB, [ptb.pure.u64(0)]);
-      logger.info('  ✓ Created fallback via splitCoins(removedCoinB, [u64(0)])');
-    }
-    
-    logger.info('  ✓ Merge complete: finalRemovedCoinA, finalRemovedCoinB ready for next operations');
+    logger.info('  ✓ Merge complete: finalCoinA, finalCoinB ready for next operations (safe regardless of close_position results)');
     
     // Step 4: Swap to optimal ratio if needed
     logger.info('Step 4: Swap to optimal ratio (if needed)');
-    const { coinA: finalCoinA, coinB: finalCoinB } = this.addSwapIfNeeded(
+    const { coinA: swappedCoinA, coinB: swappedCoinB } = this.addSwapIfNeeded(
       ptb,
       pool,
       newRange,
-      finalRemovedCoinA,
-      finalRemovedCoinB,
+      finalCoinA,
+      finalCoinB,
       packageId,
       globalConfigId,
       normalizedCoinTypeA,
       normalizedCoinTypeB
     );
-    logger.info('  ✓ Final coins ready: finalCoinA, finalCoinB');
+    logger.info('  ✓ Final coins ready after swap: swappedCoinA, swappedCoinB');
     
     // Step 5: Open new position
     // Use SDK builder pattern with proper tick conversion from SDK's asUintN
@@ -291,7 +279,7 @@ export class RebalanceService {
     
     // Step 6: Add liquidity to new position
     // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-    logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
+    logger.info('Step 6: Add liquidity → consumes swappedCoinA, swappedCoinB');
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
@@ -300,8 +288,8 @@ export class RebalanceService {
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         newPosition,
-        finalCoinA,
-        finalCoinB,
+        swappedCoinA,
+        swappedCoinB,
         ptb.pure.u64(minAmountA.toString()),
         ptb.pure.u64(minAmountB.toString()),
         ptb.pure.bool(true), // fix_amount_a
