@@ -192,7 +192,7 @@ export class RebalanceService {
     
     // Step 4: Close old position
     // Use SDK builder pattern: pool_script::close_position
-    // Takes 3 arguments: config, pool, position (no min amounts or clock)
+    // Takes 6 arguments: config, pool, position, min_amount_a, min_amount_b, clock
     logger.info('Step 4: Close old position (NFT cleanup)');
     ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
@@ -201,6 +201,9 @@ export class RebalanceService {
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         ptb.object(position.id),
+        ptb.pure.u64('0'), // min_amount_a - already removed liquidity with slippage protection
+        ptb.pure.u64('0'), // min_amount_b - already removed liquidity with slippage protection
+        ptb.object(SUI_CLOCK_OBJECT_ID), // clock
       ],
     });
     logger.info('  ✓ Position closed');
