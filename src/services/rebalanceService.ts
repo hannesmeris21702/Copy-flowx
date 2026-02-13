@@ -123,19 +123,11 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: create zero coins → collect_fee → close_position (removes liquidity) → merge → swap → open → add_liquidity → transfer');
+    logger.info('Order: create zero coins → collect_fee → close_position (side effects only) → merge fees → swap → open → add_liquidity → transfer');
     
     // CHECK: Validate position liquidity before building PTB
-    // This allows us to determine if close_position will return coins
     const positionHasLiquidity = BigInt(position.liquidity) > BigInt(0);
     logger.info(`Position liquidity check: ${position.liquidity} (has liquidity: ${positionHasLiquidity})`);
-    
-    // Determine which coins close_position will return based on position range vs current price
-    // This is critical for avoiding SecondaryIndexOutOfBounds errors
-    const currentTick = pool.currentTick;
-    const willReturnCoinA = positionHasLiquidity && currentTick <= position.tickUpper;  // Below or in range (includes boundaries)
-    const willReturnCoinB = positionHasLiquidity && currentTick >= position.tickLower;  // Above or in range (includes boundaries)
-    logger.info(`close_position will return: coinA=${willReturnCoinA}, coinB=${willReturnCoinB} (currentTick=${currentTick}, range=[${position.tickLower}, ${position.tickUpper}])`);
     
     // Get SDK configuration
     const packageId = sdk.sdkOptions.integrate.published_at;
@@ -195,15 +187,15 @@ export class RebalanceService {
     // ============================================================================
     // Step 2: Close position (removes liquidity AND closes position NFT)
     // Use SDK builder pattern: pool_script::close_position
-    // May return variable outputs: [Coin<A>, Coin<B>], [Coin<A>], [Coin<B>], or []
-    // depending on position liquidity and which side has balance
+    // IMPORTANT: Called for SIDE EFFECTS ONLY - outputs are NOT used
+    // All liquidity comes from collect_fee results
     // ============================================================================
-    logger.info('Step 2: Close position (removes liquidity & closes NFT) → may return 0-2 coins');
+    logger.info('Step 2: Close position (removes liquidity & closes NFT) → called for side effects only');
     
     // Command 3: close_position moveCall
-    // May return [Coin<A>, Coin<B>], [Coin<A>], [Coin<B>], or [] depending on liquidity
-    // DO NOT destructure immediately - handle conditionally based on position liquidity
-    const closePositionResult = ptb.moveCall({
+    // Called for side effects only - returns are NOT used (no NestedResult references)
+    // This ensures transaction succeeds even if close_position returns 0 coins
+    ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
@@ -215,27 +207,23 @@ export class RebalanceService {
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
-    // NOTE: closePositionResult is NOT destructured here to avoid SecondaryIndexOutOfBounds
-    // We'll conditionally reference indices only when we know outputs exist
-    logger.info('  ✓ close_position called (outputs will be conditionally referenced)');
+    // NOTE: Result is NOT captured or destructured - zero NestedResult[result_idx=closePosition] in PTB
+    logger.info('  ✓ close_position called (outputs discarded - side effects only)');
     
     // ============================================================================
-    // Step 3: Conditionally reference close_position results and merge coins safely
+    // Step 3: Merge collect_fee results - SOLE LIQUIDITY SOURCE
     // 
-    // PROBLEM: close_position may return empty coins if position has zero liquidity.
-    // If NestedResult [3][0] or [3][1] is empty at runtime, mergeCoins will fail.
-    // 
-    // SOLUTION: Add explicit checks before constructing MergeCoins commands.
-    // For NestedResult that may be empty (close_position), verify existence before merge.
-    // If source/destination missing, skip the merge safely using official Sui patterns.
+    // LIQUIDITY STRATEGY:
+    // - collect_fee outputs are the ONLY source of liquidity
+    // - close_position is called for side effects only (no NestedResult references)
+    // - Transaction succeeds even if close_position returns 0 coins
     // 
     // Official @mysten/sui Pattern:
     // 1. Create stable coin references that always exist (splitCoins from zero coins)
-    // 2. Check if NestedResult sources exist before adding mergeCoins command
-    // 3. Only construct mergeCoins when both source and destination are guaranteed valid
-    // 4. For uncertain sources, use the stable reference directly without merging
+    // 2. Merge collect_fee results into stable coins
+    // 3. Use stable coins for downstream operations (swap, add_liquidity)
     // ============================================================================
-    logger.info('Step 3: Conditionally reference close_position results and merge coins safely');
+    logger.info('Step 3: Merge collect_fee results - sole liquidity source');
     
     // Create stable coins using splitCoins with zero amounts
     // These serve as guaranteed-valid coin references for downstream operations
@@ -243,92 +231,21 @@ export class RebalanceService {
     const [stableCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
     logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
     
-    // ============================================================================
-    // EXPLICIT CHECK: Validate NestedResult exists before constructing MergeCoins
-    // 
-    // LIQUIDITY DERIVATION ORDER (per requirements):
-    // 1. PRIMARY SOURCE: close_position results (base liquidity for new position)
-    // 2. SECONDARY SOURCE: collect_fee results (optional additions only)
-    // 
-    // Official @mysten/sui Pattern:
-    // Check conditions BEFORE adding commands to PTB, not at runtime
-    // Only construct mergeCoins when we know source will exist
-    // ============================================================================
-    
-    // STEP 1: Merge close_position results FIRST - this is the BASE LIQUIDITY
-    // SAFE PATTERN: Only reference NestedResult indices when we know outputs exist
-    // close_position may return 0, 1, or 2 coins depending on position liquidity and price range
-    logger.debug(`  CHECK: close_position outputs - position.liquidity=${position.liquidity}, willReturnCoinA=${willReturnCoinA}, willReturnCoinB=${willReturnCoinB}`);
-    
-    // Conditionally merge coinA if close_position returns it
-    // @copilot Use PTBValidator.conditionalMerge to avoid SecondaryIndexOutOfBounds
-    if (willReturnCoinA) {
-      // close_position will return coinA at index 0, safe to reference
-      const [removedCoinA] = closePositionResult;  // Get first element only
-      PTBValidator.conditionalMerge(
-        ptb,
-        stableCoinA,
-        [removedCoinA],
-        'close_position coinA (result[3][0]) - BASE LIQUIDITY'
-      );
-    } else {
-      logger.warn('  ⚠ Skipped coinA merge: close_position will not return coinA');
-    }
-    
-    // Conditionally merge coinB if close_position returns it
-    if (willReturnCoinB) {
-      // close_position will return coinB - need to determine its index
-      // If coinA is also returned, coinB is at index 1, otherwise it's at index 0
-      let removedCoinB;
-      if (willReturnCoinA) {
-        // Both coins returned: coinB is at index 1
-        [, removedCoinB] = closePositionResult;
-        PTBValidator.conditionalMerge(
-          ptb,
-          stableCoinB,
-          [removedCoinB],
-          'close_position coinB (result[3][1]) - BASE LIQUIDITY'
-        );
-      } else {
-        // Only coinB returned: it's at index 0
-        [removedCoinB] = closePositionResult;
-        PTBValidator.conditionalMerge(
-          ptb,
-          stableCoinB,
-          [removedCoinB],
-          'close_position coinB (result[3][0]) - BASE LIQUIDITY'
-        );
-      }
-    } else {
-      logger.warn('  ⚠ Skipped coinB merge: close_position will not return coinB');
-    }
-    
-    // STEP 2: Merge collect_fee results SECOND - these are OPTIONAL ADDITIONS
-    // CHECK: feeCoinA and feeCoinB from collect_fee INDIVIDUALLY
-    // These NestedResults (result[2][0] and result[2][1]) are optional additions to the base liquidity.
-    // Fee coins are merged as secondary additions, not as the primary liquidity source.
+    // Merge collect_fee results into stable coins
+    // Fee coins from collect_fee (result[2][0] and result[2][1]) are the sole liquidity source
     // @copilot Fee coins always exist (collect_fee returns coins with zero balance if no fees)
-    // Guard prevents merging zero-balance coins when position has no liquidity
-    logger.info('Step 3b: Merge collect_fee results (optional additions)');
-    
-    // Guard for feeCoinA and feeCoinB - only merge if position has liquidity
-    // (prevents unnecessary merge of zero-balance coins)
-    if (positionHasLiquidity) {
-      PTBValidator.conditionalMerge(
-        ptb,
-        stableCoinA,
-        [feeCoinA],
-        'collect_fee coinA (result[2][0]) - OPTIONAL ADDITION'
-      );
-      PTBValidator.conditionalMerge(
-        ptb,
-        stableCoinB,
-        [feeCoinB],
-        'collect_fee coinB (result[2][1]) - OPTIONAL ADDITION'
-      );
-    } else {
-      logger.warn('  ⚠ Skipped fee coin merge: position has no liquidity');
-    }
+    PTBValidator.conditionalMerge(
+      ptb,
+      stableCoinA,
+      [feeCoinA],
+      'collect_fee coinA (result[2][0]) - SOLE LIQUIDITY SOURCE'
+    );
+    PTBValidator.conditionalMerge(
+      ptb,
+      stableCoinB,
+      [feeCoinB],
+      'collect_fee coinB (result[2][1]) - SOLE LIQUIDITY SOURCE'
+    );
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
     

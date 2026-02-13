@@ -152,17 +152,32 @@ export class SuiClientService {
     try {
       logger.info('🔍 Running pre-build PTB validation...');
       
-      // Clone transaction for validation (dry-run builds and consumes the transaction)
-      // We need to clone because Transaction.build() can only be called once
-      const validationTx = Transaction.from(tx.serialize());
+      // Note: We cannot clone transactions that use coinWithBalance or other Intents
+      // because they cannot be serialized until build(). Instead, we skip dry-run
+      // validation and rely on the actual execution to catch errors.
+      // The PTB will be built fresh on each execution attempt (see line 198).
       
-      await PTBValidator.validateBeforeBuild(
-        validationTx,
-        this.client,
-        this.getAddress()
+      // Check if transaction uses Intents that cannot be serialized
+      const ptbData = tx.getData();
+      const hasIntents = ptbData.commands.some((cmd: any) => 
+        cmd.$kind === '$Intent'
       );
       
-      logger.info('✓ Pre-build validation passed');
+      if (hasIntents) {
+        logger.info('ℹ️  Transaction uses Intents (e.g., coinWithBalance) - skipping pre-build validation');
+        logger.info('   Validation will occur during first execution attempt');
+      } else {
+        // Clone and validate for transactions without Intents
+        const validationTx = Transaction.from(tx.serialize());
+        
+        await PTBValidator.validateBeforeBuild(
+          validationTx,
+          this.client,
+          this.getAddress()
+        );
+        
+        logger.info('✓ Pre-build validation passed');
+      }
     } catch (error) {
       if (error instanceof PTBValidationError) {
         // Log detailed validation error with Copilot fix suggestion
