@@ -370,6 +370,11 @@ export class RebalanceService {
     // This ensures no NestedResult references a command result index that doesn't exist
     this.validateNestedResultReferences(ptb);
     
+    // Validate MergeCoins references to collect_fee results
+    // This prevents invalid PTB construction where MergeCoins references collect_fee
+    // results that may not exist
+    this.validateCollectFeeMergeCoins(ptb, positionHasLiquidity);
+    
     return ptb;
   }
   
@@ -439,6 +444,73 @@ export class RebalanceService {
     });
     
     logger.info(`✓ PTB validation passed: all NestedResult references are valid`);
+  }
+  
+  /**
+   * Validates that MergeCoins commands do not reference collect_fee results unless they exist.
+   * This prevents invalid PTB construction where MergeCoins tries to merge fee coins that
+   * were not actually returned by collect_fee (e.g., when position has zero liquidity).
+   * 
+   * @param ptb - The Transaction to validate
+   * @param positionHasLiquidity - Whether the position has liquidity (determines if fee coins exist)
+   * @throws Error if MergeCoins references collect_fee results when they shouldn't exist
+   */
+  private validateCollectFeeMergeCoins(ptb: Transaction, positionHasLiquidity: boolean): void {
+    const ptbData = ptb.getData();
+    const COLLECT_FEE_COMMAND_INDEX = 2; // collect_fee is command 2 in the PTB
+    
+    logger.debug(`Validating MergeCoins references to collect_fee results (command ${COLLECT_FEE_COMMAND_INDEX})`);
+    logger.debug(`Position has liquidity: ${positionHasLiquidity}`);
+    
+    // Helper function to check if an argument references collect_fee results
+    const referencesCollectFee = (arg: unknown): boolean => {
+      if (!arg || typeof arg !== 'object') {
+        return false;
+      }
+      
+      // Check if this is a NestedResult referencing collect_fee command
+      if ('$kind' in arg && arg.$kind === 'NestedResult' && 'NestedResult' in arg && Array.isArray(arg.NestedResult)) {
+        const [commandIndex] = arg.NestedResult;
+        return commandIndex === COLLECT_FEE_COMMAND_INDEX;
+      }
+      
+      // Recursively check arrays and objects
+      if (Array.isArray(arg)) {
+        return arg.some(item => referencesCollectFee(item));
+      }
+      
+      return Object.values(arg).some(value => referencesCollectFee(value));
+    };
+    
+    // Check each command for MergeCoins referencing collect_fee
+    ptbData.commands.forEach((cmd: any, idx: number) => {
+      // Check if this is a MergeCoins command
+      if (cmd?.$kind === 'MergeCoins' && cmd.MergeCoins) {
+        const mergeCoinsData = cmd.MergeCoins;
+        const sources = mergeCoinsData.sources || [];
+        
+        // Check if any source references collect_fee results
+        const hasCollectFeeReference = sources.some((source: unknown) => referencesCollectFee(source));
+        
+        if (hasCollectFeeReference) {
+          logger.debug(`  Command ${idx} (MergeCoins) references collect_fee results`);
+          
+          // If position has no liquidity, MergeCoins should not reference collect_fee
+          if (!positionHasLiquidity) {
+            throw new Error(
+              `Invalid PTB construction: MergeCoins at command ${idx} references ` +
+              `collect_fee results (command ${COLLECT_FEE_COMMAND_INDEX}), but position has zero liquidity. ` +
+              `Fee coins do not exist and cannot be merged. ` +
+              `This indicates a bug in the conditional guards.`
+            );
+          }
+          
+          logger.debug(`  ✓ Valid: MergeCoins references collect_fee and position has liquidity`);
+        }
+      }
+    });
+    
+    logger.info(`✓ MergeCoins validation passed: no invalid references to collect_fee results`);
   }
   
   private addSwapIfNeeded(
