@@ -457,9 +457,26 @@ export class RebalanceService {
    */
   private validateCollectFeeMergeCoins(ptb: Transaction, positionHasLiquidity: boolean): void {
     const ptbData = ptb.getData();
-    const COLLECT_FEE_COMMAND_INDEX = 2; // collect_fee is command 2 in the PTB
     
-    logger.debug(`Validating MergeCoins references to collect_fee results (command ${COLLECT_FEE_COMMAND_INDEX})`);
+    // Dynamically find the collect_fee command by searching for the moveCall
+    // This is more robust than hardcoding the index
+    let collectFeeCommandIndex = -1;
+    ptbData.commands.forEach((cmd: unknown, idx: number) => {
+      if (typeof cmd === 'object' && cmd !== null && '$kind' in cmd && cmd.$kind === 'MoveCall') {
+        const moveCallData = (cmd as any).MoveCall;
+        if (moveCallData?.target?.includes('collect_fee')) {
+          collectFeeCommandIndex = idx;
+        }
+      }
+    });
+    
+    // If no collect_fee command found, no validation needed
+    if (collectFeeCommandIndex === -1) {
+      logger.debug('No collect_fee command found in PTB, skipping validation');
+      return;
+    }
+    
+    logger.debug(`Validating MergeCoins references to collect_fee results (command ${collectFeeCommandIndex})`);
     logger.debug(`Position has liquidity: ${positionHasLiquidity}`);
     
     // Helper function to check if an argument references collect_fee results
@@ -471,7 +488,7 @@ export class RebalanceService {
       // Check if this is a NestedResult referencing collect_fee command
       if ('$kind' in arg && arg.$kind === 'NestedResult' && 'NestedResult' in arg && Array.isArray(arg.NestedResult)) {
         const [commandIndex] = arg.NestedResult;
-        return commandIndex === COLLECT_FEE_COMMAND_INDEX;
+        return commandIndex === collectFeeCommandIndex;
       }
       
       // Recursively check arrays and objects
@@ -483,11 +500,11 @@ export class RebalanceService {
     };
     
     // Check each command for MergeCoins referencing collect_fee
-    ptbData.commands.forEach((cmd: any, idx: number) => {
+    ptbData.commands.forEach((cmd: unknown, idx: number) => {
       // Check if this is a MergeCoins command
-      if (cmd?.$kind === 'MergeCoins' && cmd.MergeCoins) {
-        const mergeCoinsData = cmd.MergeCoins;
-        const sources = mergeCoinsData.sources || [];
+      if (typeof cmd === 'object' && cmd !== null && '$kind' in cmd && cmd.$kind === 'MergeCoins') {
+        const mergeCoinsData = (cmd as any).MergeCoins;
+        const sources = mergeCoinsData?.sources || [];
         
         // Check if any source references collect_fee results
         const hasCollectFeeReference = sources.some((source: unknown) => referencesCollectFee(source));
@@ -499,7 +516,7 @@ export class RebalanceService {
           if (!positionHasLiquidity) {
             throw new Error(
               `Invalid PTB construction: MergeCoins at command ${idx} references ` +
-              `collect_fee results (command ${COLLECT_FEE_COMMAND_INDEX}), but position has zero liquidity. ` +
+              `collect_fee results (command ${collectFeeCommandIndex}), but position has zero liquidity. ` +
               `Fee coins do not exist and cannot be merged. ` +
               `This indicates a bug in the conditional guards.`
             );
