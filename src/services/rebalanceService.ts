@@ -183,13 +183,14 @@ export class RebalanceService {
     // ============================================================================
     // Step 2: Close position (removes liquidity AND closes position NFT)
     // Use SDK builder pattern: pool_script::close_position
-    // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
-    // This replaces the separate remove_liquidity + close_position pattern
+    // May return variable outputs: [Coin<A>, Coin<B>], [Coin<A>], [Coin<B>], or []
+    // depending on position liquidity and which side has balance
     // ============================================================================
-    logger.info('Step 2: Close position (removes liquidity & closes NFT) → returns [coinA, coinB]');
+    logger.info('Step 2: Close position (removes liquidity & closes NFT) → may return 0-2 coins');
     
-    // Command 3: close_position moveCall - Returns tuple [Coin<A>, Coin<B>]
-    // closePositionResult[0] = removedCoinA, closePositionResult[1] = removedCoinB
+    // Command 3: close_position moveCall
+    // May return [Coin<A>, Coin<B>], [Coin<A>], [Coin<B>], or [] depending on liquidity
+    // DO NOT destructure immediately - handle conditionally based on position liquidity
     const closePositionResult = ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
@@ -202,8 +203,9 @@ export class RebalanceService {
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
-    const [removedCoinA, removedCoinB] = closePositionResult;  // Destructure: removedCoinA = result[3][0], removedCoinB = result[3][1]
-    logger.info('  ✓ Captured: removedCoinA (result[3][0]), removedCoinB (result[3][1]) - includes all liquidity');
+    // NOTE: closePositionResult is NOT destructured here to avoid SecondaryIndexOutOfBounds
+    // We'll conditionally reference indices only when we know outputs exist
+    logger.info('  ✓ close_position called (outputs will be conditionally referenced)');
     
     // ============================================================================
     // Step 3: Conditionally reference close_position results and merge coins safely
@@ -242,18 +244,20 @@ export class RebalanceService {
     // ============================================================================
     
     // STEP 1: Merge close_position results FIRST - this is the BASE LIQUIDITY
-    // CHECK: removedCoinA and removedCoinB from close_position
-    // These NestedResults (result[3][0] and result[3][1]) form the primary liquidity source
-    // for the new position. Always merge these first to establish base liquidity.
-    logger.debug(`  CHECK: removedCoinA (result[3][0]) and removedCoinB (result[3][1]) - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    // SAFE PATTERN: Only reference NestedResult indices when we know outputs exist
+    // close_position may return 0, 1, or 2 coins depending on position liquidity
+    logger.debug(`  CHECK: close_position outputs - position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
     if (positionHasLiquidity) {
-      // Position has liquidity: close_position will return coins, safe to construct mergeCoins
+      // Position has liquidity: close_position will return coins, safe to destructure and merge
+      // Only NOW do we create the NestedResult references because we know they'll exist
+      const [removedCoinA, removedCoinB] = closePositionResult;  // Safe: outputs exist when hasLiquidity=true
       ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA - BASE LIQUIDITY
       ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB - BASE LIQUIDITY
-      logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) - BASE LIQUIDITY from close_position');
+      logger.info('  ✓ Merged close_position outputs (result[3][0] and result[3][1]) - BASE LIQUIDITY');
     } else {
-      // Position has zero liquidity: close_position would return empty, skip merge safely
-      logger.warn('  ⚠ Skipped base liquidity merge: position has zero liquidity, close_position would return empty coins');
+      // Position has zero liquidity: close_position returns no coins, skip merge safely
+      // DO NOT reference closePositionResult[0] or [1] - they don't exist
+      logger.warn('  ⚠ Skipped base liquidity merge: position has zero liquidity, close_position returns no coins');
     }
     
     // STEP 2: Merge collect_fee results SECOND - these are OPTIONAL ADDITIONS
