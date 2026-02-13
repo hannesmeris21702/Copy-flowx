@@ -123,7 +123,7 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: create zero coins → collect_fee (side effects) → close_position (side effects) → stable coins → swap → open → add_liquidity → transfer');
+    logger.info('Order: create zero coins → collect_fee (side effects) → close_position (side effects) → split zero coins → swap → open → add_liquidity → transfer');
     
     // CHECK: Validate position liquidity before building PTB
     const positionHasLiquidity = BigInt(position.liquidity) > BigInt(0);
@@ -301,7 +301,7 @@ export class RebalanceService {
     logger.info('  ✓ Position transferred');
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
-    logger.info('Flow: zeroCoin creation → collect_fee (side effects) → close_position (side effects) → stable coins → swap (if needed) → open → add_liquidity → transfer');
+    logger.info('Flow: zeroCoin creation → collect_fee (side effects) → close_position (side effects) → split zero coins → swap (if needed) → open → add_liquidity → transfer');
     logger.info('NO COIN OBJECTS FROM collect_fee OR close_position REFERENCED');
     logger.info('ALL LIQUIDITY FROM ZERO COIN REFERENCES (Commands 0-1)');
     
@@ -337,7 +337,8 @@ export class RebalanceService {
    * as command 2 (collect_fee) is called for side effects only.
    * 
    * @param ptb - The Transaction to validate
-   * @throws Error if any NestedResult references an invalid command index or collect_fee (command 2)
+   * @throws Error if any NestedResult references an invalid command index (out of bounds or future command)
+   * @throws Error if any NestedResult references collect_fee outputs (command index 2)
    */
   private validateNestedResultReferences(ptb: Transaction): void {
     const ptbData = ptb.getData();
