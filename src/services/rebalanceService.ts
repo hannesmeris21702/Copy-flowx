@@ -215,18 +215,19 @@ export class RebalanceService {
     logger.info('  ✓ close_position called (outputs discarded - side effects only)');
     
     // ============================================================================
-    // Step 3: Use coinWithBalance intents as SOLE LIQUIDITY SOURCE
+    // Step 3: Use zero coin references as SOLE LIQUIDITY SOURCE
     // 
     // LIQUIDITY STRATEGY:
     // - collect_fee is called for side effects only (NO outputs used)
     // - close_position is called for side effects only (NO outputs used)
-    // - coinWithBalance intents are the ONLY liquidity containers
+    // - Zero coins (Commands 0-1) are split to create stable references
     // - Transaction succeeds even if collect_fee or close_position return 0 coins
     // 
     // Official @mysten/sui Pattern:
-    // 1. Create stable coin references using splitCoins from zero coins
-    // 2. Use stable coins directly for downstream operations (swap, add_liquidity)
-    // 3. No conditional merging - all liquidity comes from intents
+    // 1. Create zero coins upfront using coinWithBalance intents
+    // 2. Split zero coins to create stable coin references for downstream operations
+    // 3. Use stable coins directly for swap and add_liquidity operations
+    // 4. No conditional merging - all liquidity flows through zero coin references
     // ============================================================================
     logger.info('Step 3: Prepare stable coin references - sole liquidity source');
     
@@ -302,7 +303,7 @@ export class RebalanceService {
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
     logger.info('Flow: zeroCoin creation → collect_fee (side effects) → close_position (side effects) → stable coins → swap (if needed) → open → add_liquidity → transfer');
     logger.info('NO COIN OBJECTS FROM collect_fee OR close_position REFERENCED');
-    logger.info('ALL LIQUIDITY FROM coinWithBalance INTENTS ONLY');
+    logger.info('ALL LIQUIDITY FROM ZERO COIN REFERENCES (Commands 0-1)');
     
     // Add PTB validation: Print commands with detailed info before build
     // Log 'Command ${i}: ${txb.getEffects()}' as requested in problem statement
