@@ -5,6 +5,7 @@ import { CetusService } from './cetusService';
 import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
+import { PTBValidator } from '../utils/ptbValidator';
 import {
   calculateTickRange,
   tickToSqrtPrice,
@@ -63,8 +64,12 @@ export class RebalanceService {
     logger.info(`Expected amounts: A=${expectedAmounts.amountA}, B=${expectedAmounts.amountB}`);
     logger.info(`Min amounts (${this.config.maxSlippagePercent}% slippage): A=${minAmountA}, B=${minAmountB}`);
     
-    // Build single atomic PTB
+    // Build single atomic PTB with pre-build validation
+    // @copilot PTB validation happens inside buildRebalancePTB to catch errors early
     const ptb = await this.buildRebalancePTB(pool, position, newRange, minAmountA, minAmountB);
+    
+    // Log PTB structure for debugging (helps with SecondaryIndexOutOfBounds)
+    PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
     
     // Execute atomically (single execution)
     logger.info('Executing atomic PTB...');
@@ -256,11 +261,16 @@ export class RebalanceService {
     logger.debug(`  CHECK: close_position outputs - position.liquidity=${position.liquidity}, willReturnCoinA=${willReturnCoinA}, willReturnCoinB=${willReturnCoinB}`);
     
     // Conditionally merge coinA if close_position returns it
+    // @copilot Use PTBValidator.conditionalMerge to avoid SecondaryIndexOutOfBounds
     if (willReturnCoinA) {
       // close_position will return coinA at index 0, safe to reference
       const [removedCoinA] = closePositionResult;  // Get first element only
-      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA - BASE LIQUIDITY
-      logger.info('  ✓ Merged close_position coinA (result[3][0]) - BASE LIQUIDITY');
+      PTBValidator.conditionalMerge(
+        ptb,
+        stableCoinA,
+        [removedCoinA],
+        'close_position coinA (result[3][0]) - BASE LIQUIDITY'
+      );
     } else {
       logger.warn('  ⚠ Skipped coinA merge: close_position will not return coinA');
     }
@@ -273,13 +283,22 @@ export class RebalanceService {
       if (willReturnCoinA) {
         // Both coins returned: coinB is at index 1
         [, removedCoinB] = closePositionResult;
-        logger.info('  ✓ Merged close_position coinB (result[3][1]) - BASE LIQUIDITY');
+        PTBValidator.conditionalMerge(
+          ptb,
+          stableCoinB,
+          [removedCoinB],
+          'close_position coinB (result[3][1]) - BASE LIQUIDITY'
+        );
       } else {
         // Only coinB returned: it's at index 0
         [removedCoinB] = closePositionResult;
-        logger.info('  ✓ Merged close_position coinB (result[3][0]) - BASE LIQUIDITY');
+        PTBValidator.conditionalMerge(
+          ptb,
+          stableCoinB,
+          [removedCoinB],
+          'close_position coinB (result[3][0]) - BASE LIQUIDITY'
+        );
       }
-      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge into stable coinB - BASE LIQUIDITY
     } else {
       logger.warn('  ⚠ Skipped coinB merge: close_position will not return coinB');
     }
@@ -288,26 +307,27 @@ export class RebalanceService {
     // CHECK: feeCoinA and feeCoinB from collect_fee INDIVIDUALLY
     // These NestedResults (result[2][0] and result[2][1]) are optional additions to the base liquidity.
     // Fee coins are merged as secondary additions, not as the primary liquidity source.
-    // Per @mysten/sui TransactionBlock pattern: guard each NestedResult independently
-    // NOTE: collect_fee takes zeroCoinA and zeroCoinB and returns them with fees merged,
-    // so it ALWAYS returns both coins (unlike close_position which may return variable outputs)
-    // However, we only merge if position has liquidity (fees only exist when position has liquidity)
-    logger.debug(`  CHECK: Individual fee coins from collect_fee - positionHasLiquidity=${positionHasLiquidity}`);
+    // @copilot Fee coins always exist (collect_fee returns coins with zero balance if no fees)
+    // Guard prevents merging zero-balance coins when position has no liquidity
+    logger.info('Step 3b: Merge collect_fee results (optional additions)');
     
-    // Guard for feeCoinA (result[2][0]) - only merge if position has liquidity
+    // Guard for feeCoinA and feeCoinB - only merge if position has liquidity
+    // (prevents unnecessary merge of zero-balance coins)
     if (positionHasLiquidity) {
-      ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA - OPTIONAL ADDITION
-      logger.info('  ✓ Merged feeCoinA (result[2][0]) - OPTIONAL ADDITION from collect_fee');
+      PTBValidator.conditionalMerge(
+        ptb,
+        stableCoinA,
+        [feeCoinA],
+        'collect_fee coinA (result[2][0]) - OPTIONAL ADDITION'
+      );
+      PTBValidator.conditionalMerge(
+        ptb,
+        stableCoinB,
+        [feeCoinB],
+        'collect_fee coinB (result[2][1]) - OPTIONAL ADDITION'
+      );
     } else {
-      logger.warn('  ⚠ Skipped feeCoinA merge: position has no liquidity');
-    }
-    
-    // Guard for feeCoinB (result[2][1]) - only merge if position has liquidity
-    if (positionHasLiquidity) {
-      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB - OPTIONAL ADDITION
-      logger.info('  ✓ Merged feeCoinB (result[2][1]) - OPTIONAL ADDITION from collect_fee');
-    } else {
-      logger.warn('  ⚠ Skipped feeCoinB merge: position has no liquidity');
+      logger.warn('  ⚠ Skipped fee coin merge: position has no liquidity');
     }
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
