@@ -249,8 +249,8 @@ export class RebalanceService {
     // - NestedResult [2][0] and [2][1] are valid command outputs
     logger.debug('  CHECK: feeCoinA (result[2][0]) and feeCoinB (result[2][1]) exist - collect_fee always returns coins');
     // Source exists: safe to construct mergeCoins
-    ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Command 6: Merge result[2][0] into stable coinA
-    ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Command 7: Merge result[2][1] into stable coinB
+    ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA
+    ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB
     logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
     
     // CHECK: removedCoinA and removedCoinB from close_position
@@ -260,12 +260,12 @@ export class RebalanceService {
     logger.debug(`  CHECK: position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
     if (positionHasLiquidity) {
       // Position has liquidity: close_position will return coins, safe to construct mergeCoins
-      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Command 8: Merge result[3][0] into stable coinA
-      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Command 9: Merge result[3][1] into stable coinB
+      ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Merge result[3][0] into stable coinA
+      ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Merge result[3][1] into stable coinB
       logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) into stable references');
     } else {
-      // Position has zero liquidity: close_position will return empty, skip merge safely
-      logger.warn('  ⚠ Skipped merge: position has zero liquidity, close_position will return empty coins');
+      // Position has zero liquidity: close_position would return empty, skip merge safely
+      logger.warn('  ⚠ Skipped merge: position has zero liquidity, close_position would return empty coins');
     }
     
     logger.info('  ✓ Merge complete: stable coin references ready for swap operations');
