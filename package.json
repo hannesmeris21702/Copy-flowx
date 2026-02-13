@@ -37,6 +37,7 @@
     "@mysten/sui": "^1.18.0",
     "dotenv": "^17.2.4",
     "suiclient-error-decoder": "^1.1.0",
+    "tslib": "^2.8.1",
     "winston": "^3.19.0"
   },
   "engines": {
