@@ -243,15 +243,22 @@ export class RebalanceService {
     // ============================================================================
     
     // Merge collect_fee results into stable references
-    // CHECK: feeCoinA and feeCoinB are guaranteed to exist because:
-    // - collect_fee was called with zeroCoinA/B as inputs
-    // - Move function always returns Coin objects (may be zero balance, but exist)
-    // - NestedResult [2][0] and [2][1] are valid command outputs
-    logger.debug('  CHECK: feeCoinA (result[2][0]) and feeCoinB (result[2][1]) exist - collect_fee always returns coins');
-    // Source exists: safe to construct mergeCoins
-    ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA
-    ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB
-    logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
+    // CHECK: feeCoinA and feeCoinB from collect_fee NestedResult [2][0] and [2][1]
+    // These MAY be empty at runtime if no fees have accumulated
+    // Per problem statement: "fee coins are only merged if collect_fee actually returned them"
+    // Solution: Use official Sui TransactionBlock result-length checks
+    // Check position.liquidity BEFORE constructing mergeCoins (same pattern as close_position)
+    // Fees can only exist if position has or had liquidity
+    logger.debug(`  CHECK: position.liquidity=${position.liquidity}, hasLiquidity=${positionHasLiquidity}`);
+    if (positionHasLiquidity) {
+      // Position has liquidity: collect_fee will return coins, safe to construct mergeCoins
+      ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Merge result[2][0] into stable coinA
+      ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Merge result[2][1] into stable coinB
+      logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
+    } else {
+      // Position has zero liquidity: collect_fee may return empty, skip merge safely
+      logger.warn('  ⚠ Skipped merge: position has zero liquidity, collect_fee may return empty coins');
+    }
     
     // CHECK: removedCoinA and removedCoinB from close_position
     // These NestedResults MAY be empty at runtime if position has zero liquidity
