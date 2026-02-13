@@ -373,13 +373,13 @@ export class RebalanceService {
     logger.debug(`Validating NestedResult references in PTB with ${totalCommands} commands`);
     
     // Helper function to recursively check for NestedResult in an object
-    const checkForNestedResult = (obj: any, currentCommandIdx: number, path: string = ''): void => {
+    const checkForNestedResult = (obj: unknown, currentCommandIdx: number, path: string = ''): void => {
       if (!obj || typeof obj !== 'object') {
         return;
       }
       
       // Check if this is a NestedResult
-      if (obj.$kind === 'NestedResult' && Array.isArray(obj.NestedResult)) {
+      if (typeof obj === 'object' && obj !== null && '$kind' in obj && obj.$kind === 'NestedResult' && 'NestedResult' in obj && Array.isArray(obj.NestedResult)) {
         const [commandIndex, resultIndex] = obj.NestedResult;
         
         // Validate that the referenced command index exists and comes before current command
@@ -406,19 +406,20 @@ export class RebalanceService {
       // Recursively check all properties
       if (Array.isArray(obj)) {
         obj.forEach((item, idx) => {
-          checkForNestedResult(item, currentCommandIdx, `${path}[${idx}]`);
+          checkForNestedResult(item, currentCommandIdx, path ? `${path}[${idx}]` : `[${idx}]`);
         });
       } else {
         Object.keys(obj).forEach(key => {
           if (key !== '$kind') { // Skip the $kind marker
-            checkForNestedResult(obj[key], currentCommandIdx, path ? `${path}.${key}` : key);
+            const value = (obj as Record<string, unknown>)[key];
+            checkForNestedResult(value, currentCommandIdx, path ? `${path}.${key}` : key);
           }
         });
       }
     };
     
     // Check each command for NestedResult references
-    ptbData.commands.forEach((cmd: any, idx: number) => {
+    ptbData.commands.forEach((cmd: unknown, idx: number) => {
       checkForNestedResult(cmd, idx, `Command[${idx}]`);
     });
     
