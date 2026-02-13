@@ -118,7 +118,7 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: collect_fee → close_position (removes liquidity) → merge → swap → open → add_liquidity → transfer');
+    logger.info('Order: create zero coins → collect_fee → close_position (removes liquidity) → merge → swap → open → add_liquidity → transfer');
     
     // Get SDK configuration
     const packageId = sdk.sdkOptions.integrate.published_at;
