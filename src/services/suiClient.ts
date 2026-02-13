@@ -160,7 +160,7 @@ export class SuiClientService {
       // Check if transaction uses Intents that cannot be serialized
       const ptbData = tx.getData();
       const hasIntents = ptbData.commands.some((cmd: any) => 
-        cmd.$kind === '$Intent' || (cmd.$Intent && cmd.$kind === '$Intent')
+        cmd.$kind === '$Intent'
       );
       
       if (hasIntents) {
