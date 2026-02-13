@@ -12,3 +12,6 @@ logs/
 
 # Environment
 .env
+
+# Test files
+test-ptb-dry-run.js
