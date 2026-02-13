@@ -217,11 +217,11 @@ export class RebalanceService {
     // ============================================================================
     logger.info('Step 3: Conditionally reference close_position results and merge coins safely');
     
-    // Create fallback coins using splitCoins with zero amounts
+    // Create stable coins using splitCoins with zero amounts
     // These serve as stable coin references that always exist
     // Even if close_position returns no coins, we have valid coin objects to work with
-    const [finalCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create stable coinA reference
-    const [finalCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
+    const [stableCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create stable coinA reference
+    const [stableCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
     logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
     
     // Merge close_position results into stable references
@@ -229,18 +229,18 @@ export class RebalanceService {
     // If close_position returns coins, they get merged into our stable references
     // IMPORTANT: This is safe because Sui PTB handles empty NestedResult gracefully
     logger.debug('  Merging close_position results (if they exist) into stable references');
-    ptb.mergeCoins(finalCoinA, [removedCoinA]);  // Command 6: Merge result[3][0] into stable coinA (safe if empty)
-    ptb.mergeCoins(finalCoinB, [removedCoinB]);  // Command 7: Merge result[3][1] into stable coinB (safe if empty)
+    ptb.mergeCoins(stableCoinA, [removedCoinA]);  // Command 6: Merge result[3][0] into stable coinA (safe if empty)
+    ptb.mergeCoins(stableCoinB, [removedCoinB]);  // Command 7: Merge result[3][1] into stable coinB (safe if empty)
     logger.info('  ✓ Merged removedCoinA (result[3][0]) and removedCoinB (result[3][1]) if they exist');
     
     // Merge collect_fee results into stable references
     // We know these exist because collect_fee was passed zero coins as input
     logger.debug('  Merging collect_fee results into stable references');
-    ptb.mergeCoins(finalCoinA, [feeCoinA]);  // Command 8: Merge result[2][0] into stable coinA
-    ptb.mergeCoins(finalCoinB, [feeCoinB]);  // Command 9: Merge result[2][1] into stable coinB
+    ptb.mergeCoins(stableCoinA, [feeCoinA]);  // Command 8: Merge result[2][0] into stable coinA
+    ptb.mergeCoins(stableCoinB, [feeCoinB]);  // Command 9: Merge result[2][1] into stable coinB
     logger.info('  ✓ Merged feeCoinA (result[2][0]) and feeCoinB (result[2][1]) into stable references');
     
-    logger.info('  ✓ Merge complete: finalCoinA, finalCoinB ready for next operations (safe regardless of close_position results)');
+    logger.info('  ✓ Merge complete: stable coin references ready for swap operations (safe regardless of close_position results)');
     
     // Step 4: Swap to optimal ratio if needed
     logger.info('Step 4: Swap to optimal ratio (if needed)');
@@ -248,8 +248,8 @@ export class RebalanceService {
       ptb,
       pool,
       newRange,
-      finalCoinA,
-      finalCoinB,
+      stableCoinA,
+      stableCoinB,
       packageId,
       globalConfigId,
       normalizedCoinTypeA,
