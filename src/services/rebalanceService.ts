@@ -414,6 +414,10 @@ export class RebalanceService {
         
         newPositionId = openResult.positionId;
         
+        // Assign and log the new runtime position ID
+        this.currentPositionId = openResult.positionId;
+        logger.info(`Using new runtime position ID: ${this.currentPositionId}`);
+        
         // Structured log for position opening
         logOpenPosition({
           poolId: pool.id,
