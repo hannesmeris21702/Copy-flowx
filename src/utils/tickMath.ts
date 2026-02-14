@@ -444,8 +444,8 @@ export function calculateSwapAmount(
     // valueDiffA is the excess value in terms of token B
     // currentPrice is tokenB per tokenA, so to get token A amount:
     // amountA = value_in_B / price_in_B_per_A
-    const swapValueNeeded = valueDiffA;
-    const swapAmountA = BigInt(Math.floor(swapValueNeeded / currentPrice));
+    const excessValueA = valueDiffA;
+    const swapAmountA = BigInt(Math.floor(excessValueA / currentPrice));
     
     if (swapAmountA <= BigInt(0) || swapAmountA > availableA) {
       return null;
@@ -459,8 +459,8 @@ export function calculateSwapAmount(
   } else if (valueDiffB > 0) {
     // We have excess value in token B, need to swap B → A
     // valueDiffB is already the amount in terms of token B (no conversion needed)
-    const swapValueNeeded = valueDiffB;
-    const swapAmountB = BigInt(Math.floor(swapValueNeeded));
+    const excessValueB = valueDiffB;
+    const swapAmountB = BigInt(Math.floor(excessValueB));
     
     if (swapAmountB <= BigInt(0) || swapAmountB > availableB) {
       return null;

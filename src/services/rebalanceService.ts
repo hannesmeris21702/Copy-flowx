@@ -638,15 +638,16 @@ export class RebalanceService {
       logger.info(`Final Amount B: ${finalAmountB.toString()}`);
       logger.info('========================================');
       
-      // Step 6: Validation BEFORE addLiquidity
+      // Step 6: Enhanced Validation Before addLiquidity
       logger.info('=== Step 6: Enhanced Validation Before addLiquidity ===');
       let validationPassed = false;
       let validationErrors: string[] = [];
       
       // HARD SAFETY CHECK 1: Never allow both tokens to be zero
       if (finalAmountA === BigInt(0) && finalAmountB === BigInt(0)) {
-        validationErrors.push('Both tokens are zero - cannot add liquidity');
-        logger.error('❌ HARD SAFETY CHECK FAILED: Both tokens are zero');
+        const errorMsg = 'Both tokens are zero - cannot add liquidity';
+        validationErrors.push(errorMsg);
+        logger.error(`❌ HARD SAFETY CHECK FAILED: ${errorMsg}`);
       }
       
       // HARD SAFETY CHECK 2: Validate based on price position
@@ -655,8 +656,9 @@ export class RebalanceService {
           logger.info('✅ Validation PASSED: Both tokens have positive amounts (INSIDE position)');
           validationPassed = true;
         } else {
-          validationErrors.push('INSIDE position requires both tokens > 0');
-          logger.error('❌ Validation FAILED: INSIDE position requires both tokens > 0');
+          const errorMsg = 'INSIDE position requires both tokens > 0';
+          validationErrors.push(errorMsg);
+          logger.error(`❌ Validation FAILED: ${errorMsg}`);
           logger.error(`  Final Amount A: ${finalAmountA.toString()}`);
           logger.error(`  Final Amount B: ${finalAmountB.toString()}`);
           
@@ -673,8 +675,9 @@ export class RebalanceService {
           logger.info('✅ Validation PASSED: Token A has positive amount (BELOW position)');
           validationPassed = true;
         } else {
-          validationErrors.push('BELOW position requires Token A > 0');
-          logger.error('❌ Validation FAILED: BELOW position requires Token A > 0');
+          const errorMsg = 'BELOW position requires Token A > 0';
+          validationErrors.push(errorMsg);
+          logger.error(`❌ Validation FAILED: ${errorMsg}`);
           logger.error(`  Final Amount A: ${finalAmountA.toString()}`);
         }
       } else {
@@ -683,8 +686,9 @@ export class RebalanceService {
           logger.info('✅ Validation PASSED: Token B has positive amount (ABOVE position)');
           validationPassed = true;
         } else {
-          validationErrors.push('ABOVE position requires Token B > 0');
-          logger.error('❌ Validation FAILED: ABOVE position requires Token B > 0');
+          const errorMsg = 'ABOVE position requires Token B > 0';
+          validationErrors.push(errorMsg);
+          logger.error(`❌ Validation FAILED: ${errorMsg}`);
           logger.error(`  Final Amount B: ${finalAmountB.toString()}`);
         }
       }
