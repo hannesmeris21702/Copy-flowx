@@ -251,10 +251,6 @@ export class PTBValidator {
   }
   
   /**
-   * Logs PTB command structure for debugging
-   * Use this before build() to inspect command flow
-   */
-  /**
    * Log PTB command structure
    * In DEBUG_MODE: Prints full PTB structure with detailed command info
    * In production: Uses minimal logging
