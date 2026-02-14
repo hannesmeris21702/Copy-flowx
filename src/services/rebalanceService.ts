@@ -497,7 +497,7 @@ export class RebalanceService {
       logger.info('Step 7: Transfer newPosition NFT to sender');
       safeTransferObjects(
         ptb,
-        openPositionResult,
+        newPosition,
         ptb.pure.address(this.suiClient.getAddress()),
         { description: 'position NFT to sender' }
       );
