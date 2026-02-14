@@ -277,9 +277,34 @@ export class RebalanceService {
     });
     logger.info('  ✓ Captured: newPosition NFT');
     
+    // ============================================================================
+    // Step 5.5: Validate coins before add_liquidity_by_fix_coin
+    // Ensure both coinA and coinB exist; use zero coin split as fallback
+    // This prevents add_liquidity_by_fix_coin from receiving invalid coin objects
+    // ============================================================================
+    logger.info('Step 5.5: Validate coins for add_liquidity');
+    
+    // Validate swappedCoinA - if missing or invalid, use zero coin split as fallback
+    let finalCoinA = swappedCoinA;
+    if (!swappedCoinA) {
+      logger.warn('  ⚠ swappedCoinA is missing, using zeroCoin split as fallback');
+      const [fallbackCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);
+      finalCoinA = fallbackCoinA;
+    }
+    
+    // Validate swappedCoinB - if missing or invalid, use zero coin split as fallback
+    let finalCoinB = swappedCoinB;
+    if (!swappedCoinB) {
+      logger.warn('  ⚠ swappedCoinB is missing, using zeroCoin split as fallback');
+      const [fallbackCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);
+      finalCoinB = fallbackCoinB;
+    }
+    
+    logger.info('  ✓ Both coins validated: finalCoinA and finalCoinB ready');
+    
     // Step 6: Add liquidity to new position
     // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-    logger.info('Step 6: Add liquidity → consumes swappedCoinA, swappedCoinB');
+    logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
@@ -288,8 +313,8 @@ export class RebalanceService {
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         newPosition,
-        swappedCoinA,
-        swappedCoinB,
+        finalCoinA,
+        finalCoinB,
         ptb.pure.u64(minAmountA.toString()),
         ptb.pure.u64(minAmountB.toString()),
         ptb.pure.bool(true), // fix_amount_a
@@ -428,6 +453,24 @@ export class RebalanceService {
     logger.info(`✓ ZERO NestedResult[2] references found (collect_fee is side-effects only)`);
   }
   
+  /**
+   * Safe merge helper function for conditional coin merging.
+   * Only merges if the source coin exists (not undefined or null).
+   * 
+   * @param ptb - The Transaction builder
+   * @param destination - The destination coin to merge into
+   * @param source - The source coin to merge from (may be undefined/null)
+   */
+  private safeMerge(
+    ptb: Transaction,
+    destination: TransactionObjectArgument,
+    source: TransactionObjectArgument | undefined | null
+  ): void {
+    if (source !== undefined && source !== null) {
+      ptb.mergeCoins(destination, [source]);
+    }
+  }
+  
   private addSwapIfNeeded(
     ptb: Transaction,
     pool: Pool,
@@ -488,10 +531,11 @@ export class RebalanceService {
       });
       
       // Swap was performed: reference the NestedResult output and merge
+      // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinA) into coinA');
-      ptb.mergeCoins(coinA, [swappedCoinA]);
+      this.safeMerge(ptb, coinA, swappedCoinA);
       logger.debug('  Merging swap remainder (remainderCoinB) into coinB');
-      ptb.mergeCoins(coinB, [remainderCoinB]);
+      this.safeMerge(ptb, coinB, remainderCoinB);
       logger.info('  ✓ Swapped: coinB to coinA, output and remainder merged into stable coins');
       
       return { coinA, coinB };
@@ -529,10 +573,11 @@ export class RebalanceService {
       });
       
       // Swap was performed: reference the NestedResult output and merge
+      // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinB) into coinB');
-      ptb.mergeCoins(coinB, [swappedCoinB]);
+      this.safeMerge(ptb, coinB, swappedCoinB);
       logger.debug('  Merging swap remainder (remainderCoinA) into coinA');
-      ptb.mergeCoins(coinA, [remainderCoinA]);
+      this.safeMerge(ptb, coinA, remainderCoinA);
       logger.info('  ✓ Swapped: coinA to coinB, output and remainder merged into stable coins');
       
       return { coinA, coinB };
