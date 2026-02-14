@@ -73,17 +73,9 @@ export class RebalancingBot {
       // Generate report
       const report = await this.monitorService.generateReport();
       
-      // Check if rebalancing is needed
+      // Check if rebalancing is needed (based on OUT_OF_RANGE status)
       if (!report.shouldRebalance) {
         logger.info(`No rebalancing needed: ${report.reason}`);
-        return;
-      }
-      
-      // Check if deviation exceeds threshold
-      if (Math.abs(report.priceDeviation) < this.config.rebalanceThresholdPercent) {
-        logger.info(
-          `Deviation ${report.priceDeviation.toFixed(2)}% below threshold ${this.config.rebalanceThresholdPercent}%`
-        );
         return;
       }
       
