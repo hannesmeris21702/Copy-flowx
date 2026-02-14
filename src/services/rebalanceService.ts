@@ -4,6 +4,7 @@ import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
+import { calculateQuoteValue } from '../utils/tickMath';
 
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
@@ -83,10 +84,32 @@ export class RebalanceService {
       logger.info('These balances are the ONLY liquidity source for new position');
       logger.info('============================================');
       
+      // Calculate value using pool price data
+      currentStage = 'calculate_value';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      logger.info('Calculating total value using pool price data...');
+      
+      const sqrtPrice = BigInt(pool.currentSqrtPrice);
+      const { valueA, valueB, totalValue } = calculateQuoteValue(
+        availableA,
+        availableB,
+        sqrtPrice
+      );
+      
+      logger.info('=== Portfolio Value (in terms of Token B) ===');
+      logger.info(`Value of Token A: ${valueA.toFixed(6)}`);
+      logger.info(`Value of Token B: ${valueB.toFixed(6)}`);
+      logger.info(`Total Value: ${totalValue.toFixed(6)}`);
+      logger.info('This totalValue MUST be preserved when opening new position');
+      logger.info('=============================================');
+      
       addSentryBreadcrumb('Wallet balances queried', 'rebalance', {
         positionId: position.id,
         availableA: availableA.toString(),
         availableB: availableB.toString(),
+        valueA: valueA.toString(),
+        valueB: valueB.toString(),
+        totalValue: totalValue.toString(),
       });
       
       addSentryBreadcrumb('Position closed successfully', 'rebalance', {

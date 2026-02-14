@@ -138,3 +138,50 @@ export function calculatePriceDeviation(
   
   return ((currentTick - tickUpper) / rangeWidth) * 100;
 }
+
+/**
+ * Convert sqrt price (X96 format) to actual price
+ * Price = (sqrtPrice / 2^96)^2
+ * This gives the price of tokenA in terms of tokenB (i.e., how much tokenB per 1 tokenA)
+ * 
+ * @param sqrtPriceX96 The sqrt price in X96 format
+ * @returns The actual price as a number (tokenB/tokenA)
+ */
+export function sqrtPriceToPrice(sqrtPriceX96: bigint): number {
+  // sqrtPrice is in Q96 format (multiplied by 2^96)
+  // Price = (sqrtPrice / 2^96)^2
+  const sqrtPrice = Number(sqrtPriceX96) / Number(Q96);
+  return sqrtPrice * sqrtPrice;
+}
+
+/**
+ * Calculate the value of token amounts in terms of the quote token (tokenB)
+ * 
+ * @param amountA Amount of tokenA
+ * @param amountB Amount of tokenB
+ * @param sqrtPriceX96 Current sqrt price from pool
+ * @returns Object with valueA (in terms of B), valueB, and totalValue
+ */
+export function calculateQuoteValue(
+  amountA: bigint,
+  amountB: bigint,
+  sqrtPriceX96: bigint
+): { valueA: number; valueB: number; totalValue: number } {
+  // Get the price (tokenB per tokenA)
+  const price = sqrtPriceToPrice(sqrtPriceX96);
+  
+  // Convert amounts to numbers for calculation
+  const amountANum = Number(amountA);
+  const amountBNum = Number(amountB);
+  
+  // Calculate value of A in terms of B
+  const valueA = amountANum * price;
+  
+  // Value of B is just the amount of B
+  const valueB = amountBNum;
+  
+  // Total value in terms of B
+  const totalValue = valueA + valueB;
+  
+  return { valueA, valueB, totalValue };
+}
