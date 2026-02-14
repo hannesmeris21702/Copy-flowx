@@ -50,7 +50,7 @@ export class MonitorService {
         pool,
         position: null,
         currentTick: pool.currentTick,
-        isInRange: true, // No position to be out of range
+        isInRange: true, // Set to true since no position means no need to rebalance
         priceDeviation: 0,
         suggestedNewRange,
         shouldRebalance: false,

@@ -42,7 +42,7 @@ export function loadConfig(): BotConfig {
     privateKey,
     rpcUrl,
     poolId,
-    initialPositionId: initialPositionId || undefined,
+    initialPositionId,
     rebalanceThresholdPercent: parseFloat(
       getEnvVarWithDefault('REBALANCE_THRESHOLD_PERCENT', '2.0')
     ),
