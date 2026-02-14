@@ -4,8 +4,13 @@ import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
 import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
+import { logPTBValidation } from '../utils/botLogger';
+import { explainError } from '../utils/errorExplainer';
+import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
 import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
 import { PTBValidator } from '../utils/ptbValidator';
+import { PTBPreExecutionValidator } from '../utils/ptbPreExecutionValidator';
+import { safeMergeCoins, safeTransferObjects, safeUseNestedResult, safeUseNestedResultOptional } from '../utils/ptbHelpers';
 import {
   calculateTickRange,
   tickToSqrtPrice,
@@ -33,50 +38,158 @@ export class RebalanceService {
   }
   
   async rebalance(pool: Pool, position: Position): Promise<void> {
-    logger.info('=== Starting Atomic PTB Rebalance ===');
+    // Track current stage for error reporting
+    let currentStage = 'rebalance_start';
     
-    // Pre-execution validation
-    await this.suiClient.checkGasPrice();
+    // Set Sentry context with pool and position metadata
+    setSentryContext({
+      poolId: pool.id,
+      positionId: position.id,
+      stage: currentStage,
+    });
     
-    // Calculate new range with validated tick spacing
-    const newRange = calculateTickRange(
-      pool.currentTick,
-      this.config.rangeWidthPercent,
-      pool.tickSpacing
-    );
+    addSentryBreadcrumb('Starting rebalance', 'rebalance', {
+      poolId: pool.id,
+      positionId: position.id,
+      currentTick: pool.currentTick,
+      positionRange: `[${position.tickLower}, ${position.tickUpper}]`,
+    });
     
-    logger.info(`Current tick: ${pool.currentTick}`);
-    logger.info(`Old range: [${position.tickLower}, ${position.tickUpper}]`);
-    logger.info(`New range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
-    
-    // Validate tick spacing alignment
-    if (newRange.tickLower % pool.tickSpacing !== 0 || newRange.tickUpper % pool.tickSpacing !== 0) {
-      throw new Error('New range ticks not aligned to tick spacing');
+    try {
+      logger.info('=== Starting Atomic PTB Rebalance ===');
+      
+      // Pre-execution validation
+      currentStage = 'pre_execution_validation';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      await this.suiClient.checkGasPrice();
+      
+      // Calculate new range with validated tick spacing
+      currentStage = 'calculate_range';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      const newRange = calculateTickRange(
+        pool.currentTick,
+        this.config.rangeWidthPercent,
+        pool.tickSpacing
+      );
+      
+      logger.info(`Current tick: ${pool.currentTick}`);
+      logger.info(`Old range: [${position.tickLower}, ${position.tickUpper}]`);
+      logger.info(`New range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+      
+      addSentryBreadcrumb('Calculated new range', 'rebalance', {
+        oldRange: `[${position.tickLower}, ${position.tickUpper}]`,
+        newRange: `[${newRange.tickLower}, ${newRange.tickUpper}]`,
+      });
+      
+      // Validate tick spacing alignment
+      if (newRange.tickLower % pool.tickSpacing !== 0 || newRange.tickUpper % pool.tickSpacing !== 0) {
+        throw new Error('New range ticks not aligned to tick spacing');
+      }
+      
+      // Calculate expected amounts with slippage protection
+      currentStage = 'calculate_amounts';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      // FIXED: Use bigint arithmetic to avoid precision loss
+      const expectedAmounts = this.calculateExpectedAmounts(pool, position);
+      const slippagePercent = BigInt(Math.floor(this.config.maxSlippagePercent * 100)); // Convert to basis points
+      const minAmountA = (expectedAmounts.amountA * (BigInt(10000) - slippagePercent)) / BigInt(10000);
+      const minAmountB = (expectedAmounts.amountB * (BigInt(10000) - slippagePercent)) / BigInt(10000);
+      
+      logger.info(`Expected amounts: A=${expectedAmounts.amountA}, B=${expectedAmounts.amountB}`);
+      logger.info(`Min amounts (${this.config.maxSlippagePercent}% slippage): A=${minAmountA}, B=${minAmountB}`);
+      
+      // Build single atomic PTB with pre-build validation
+      currentStage = 'build_ptb';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      addSentryBreadcrumb('Building PTB', 'rebalance', {
+        minAmountA: minAmountA.toString(),
+        minAmountB: minAmountB.toString(),
+      });
+      
+      // @copilot PTB validation happens inside buildRebalancePTB to catch errors early
+      const ptb = await this.buildRebalancePTB(pool, position, newRange, minAmountA, minAmountB);
+      
+      // Log PTB structure for debugging (helps with SecondaryIndexOutOfBounds)
+      PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
+      
+      // CRITICAL: Pre-execution validation before submitting PTB
+      // Validates:
+      // 1. All NestedResult references point to valid commands
+      // 2. open_position return is handled safely
+      // 3. add_liquidity coin inputs exist
+      // Throws descriptive errors early if validation fails
+      logger.info('Running pre-execution PTB validation...');
+      PTBPreExecutionValidator.validateBeforeExecution(ptb);
+      logger.info('✅ Pre-execution validation passed - PTB is safe to execute');
+      
+      // Execute atomically (single execution)
+      currentStage = 'execute_ptb';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      addSentryBreadcrumb('Executing PTB', 'rebalance', {
+        poolId: pool.id,
+        positionId: position.id,
+      });
+      
+      logger.info('Executing atomic PTB...');
+      const result = await this.suiClient.executeTransactionWithoutSimulation(ptb);
+      
+      addSentryBreadcrumb('Rebalance completed successfully', 'rebalance', {
+        digest: result.digest,
+      });
+      
+      logger.info(`✅ Rebalance successful! Digest: ${result.digest}`);
+      logger.info('=== Atomic PTB Rebalance Complete ===');
+      
+    } catch (error) {
+      // Use error explainer to provide clear guidance
+      logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      logger.error('❌ REBALANCE EXECUTION FAILED');
+      logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      
+      const explained = explainError(error as Error);
+      
+      if (explained.matched) {
+        const explanation = explained.explanation!;
+        
+        logger.error(`\n📋 ERROR TYPE: ${explained.errorType}`);
+        logger.error(`\n📖 EXPLANATION:\n${explanation.description}`);
+        
+        logger.error(`\n🔍 POSSIBLE CAUSES:`);
+        explanation.causes.forEach((cause, idx) => {
+          logger.error(`  ${idx + 1}. ${cause}`);
+        });
+        
+        logger.error(`\n💡 SUGGESTED SOLUTIONS:`);
+        explanation.fixes.forEach((fix, idx) => {
+          logger.error(`  ${idx + 1}. ${fix}`);
+        });
+        
+        if (explanation.examples && explanation.examples.length > 0) {
+          logger.error(`\n📝 EXAMPLES:`);
+          explanation.examples.forEach(example => {
+            logger.error(`  ${example}`);
+          });
+        }
+      } else {
+        logger.error(`\n⚠️  Unknown error type - no specific explanation available`);
+      }
+      
+      // Log original error with stack trace
+      logger.error(`\n🐛 ORIGINAL ERROR:`);
+      logger.error(error as Error);
+      
+      logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      
+      // Capture error in Sentry with pool, position, and current stage context
+      captureException(error, {
+        poolId: pool.id,
+        positionId: position.id,
+        stage: currentStage,
+      });
+      
+      // Re-throw the error - don't suppress it
+      throw error;
     }
-    
-    // Calculate expected amounts with slippage protection
-    // FIXED: Use bigint arithmetic to avoid precision loss
-    const expectedAmounts = this.calculateExpectedAmounts(pool, position);
-    const slippagePercent = BigInt(Math.floor(this.config.maxSlippagePercent * 100)); // Convert to basis points
-    const minAmountA = (expectedAmounts.amountA * (BigInt(10000) - slippagePercent)) / BigInt(10000);
-    const minAmountB = (expectedAmounts.amountB * (BigInt(10000) - slippagePercent)) / BigInt(10000);
-    
-    logger.info(`Expected amounts: A=${expectedAmounts.amountA}, B=${expectedAmounts.amountB}`);
-    logger.info(`Min amounts (${this.config.maxSlippagePercent}% slippage): A=${minAmountA}, B=${minAmountB}`);
-    
-    // Build single atomic PTB with pre-build validation
-    // @copilot PTB validation happens inside buildRebalancePTB to catch errors early
-    const ptb = await this.buildRebalancePTB(pool, position, newRange, minAmountA, minAmountB);
-    
-    // Log PTB structure for debugging (helps with SecondaryIndexOutOfBounds)
-    PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
-    
-    // Execute atomically (single execution)
-    logger.info('Executing atomic PTB...');
-    const result = await this.suiClient.executeTransactionWithoutSimulation(ptb);
-    
-    logger.info(`✅ Rebalance successful! Digest: ${result.digest}`);
-    logger.info('=== Atomic PTB Rebalance Complete ===');
   }
   
   private calculateExpectedAmounts(pool: Pool, position: Position): { amountA: bigint; amountB: bigint } {
@@ -134,10 +247,17 @@ export class RebalanceService {
     const globalConfigId = sdk.sdkOptions.clmm_pool.config!.global_config_id;
     
     // Normalize type arguments to prevent parsing errors
-    const [normalizedCoinTypeA, normalizedCoinTypeB] = normalizeTypeArguments([
+    const normalizedTypeArgs = normalizeTypeArguments([
       pool.coinTypeA,
       pool.coinTypeB
     ]);
+    const normalizedCoinTypeA = normalizedTypeArgs[0];
+    const normalizedCoinTypeB = normalizedTypeArgs[1];
+    
+    if (!normalizedCoinTypeA || !normalizedCoinTypeB) {
+      throw new Error('Type argument normalization failed: missing normalized types');
+    }
+    
     logger.debug(`Type args normalized: A=${normalizedCoinTypeA}, B=${normalizedCoinTypeB}`);
     
     // Validate that type arguments are properly normalized
@@ -233,8 +353,16 @@ export class RebalanceService {
     
     // Create stable coins using splitCoins with zero amounts
     // These serve as guaranteed-valid coin references for downstream operations
-    const [stableCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create stable coinA reference
-    const [stableCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
+    const stableCoinA = safeUseNestedResult(
+      ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]),
+      0,
+      'stable coinA reference from splitCoins'
+    );  // Command 4: Create stable coinA reference
+    const stableCoinB = safeUseNestedResult(
+      ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]),
+      0,
+      'stable coinB reference from splitCoins'
+    );  // Command 5: Create stable coinB reference
     logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
     logger.info('  ✓ Stable coin references ready for swap operations (NO merge operations)');
     
@@ -288,9 +416,13 @@ export class RebalanceService {
     // If such an edge case occurs, requirements specify: skip transferObjects,
     // allow transaction to complete normally to prevent transaction failure
     //
-    // Extract position NFT using array destructuring to create NestedResult[x,0] reference
+    // Extract position NFT using safe helper to avoid direct indexing
     // If the result doesn't contain a position at index 0, newPosition will be undefined
-    const [newPosition] = openPositionResult;
+    const newPosition = safeUseNestedResultOptional(
+      openPositionResult,
+      0,
+      'position NFT from open_position'
+    );
     
     // Verify extraction succeeded
     if (newPosition) {
@@ -313,7 +445,11 @@ export class RebalanceService {
     let finalCoinA = swappedCoinA;
     if (!swappedCoinA) {
       logger.warn('  ⚠ swappedCoinA is missing, using zeroCoin split as fallback');
-      const [fallbackCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);
+      const fallbackCoinA = safeUseNestedResult(
+        ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]),
+        0,
+        'fallback coinA from splitCoins'
+      );
       finalCoinA = fallbackCoinA;
     }
     
@@ -321,7 +457,11 @@ export class RebalanceService {
     let finalCoinB = swappedCoinB;
     if (!swappedCoinB) {
       logger.warn('  ⚠ swappedCoinB is missing, using zeroCoin split as fallback');
-      const [fallbackCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);
+      const fallbackCoinB = safeUseNestedResult(
+        ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]),
+        0,
+        'fallback coinB from splitCoins'
+      );
       finalCoinB = fallbackCoinB;
     }
     
@@ -352,10 +492,15 @@ export class RebalanceService {
       });
       logger.info('  ✓ Liquidity added, coins consumed');
       
-      // Step 7: Transfer new position NFT to sender using safeTransfer helper
-      // safeTransfer checks moveCallResult && moveCallResult[0] before transferring
+      // Step 7: Transfer new position NFT to sender using safe helper
+      // safeTransferObjects checks if object exists before transferring
       logger.info('Step 7: Transfer newPosition NFT to sender');
-      this.safeTransfer(ptb, openPositionResult, ptb.pure.address(this.suiClient.getAddress()));
+      safeTransferObjects(
+        ptb,
+        openPositionResult,
+        ptb.pure.address(this.suiClient.getAddress()),
+        { description: 'position NFT to sender' }
+      );
       logger.info('  ✓ Position transferred');
     } else {
       // Per requirements: If no position NFT is returned, skip transferObjects
@@ -387,16 +532,7 @@ export class RebalanceService {
     // Log 'Command ${i}: ${txb.getEffects()}' as requested in problem statement
     // Note: getEffects() is not available pre-build, so we log command structure
     const ptbData = ptb.getData();
-    console.log('=== PTB COMMANDS PRE-BUILD VALIDATION ===');
-    console.log(`Total commands: ${ptbData.commands.length}`);
-    ptbData.commands.forEach((cmd: any, idx: number) => {
-      // Log command with index and type info (effects not available until execution)
-      const cmdType = cmd.$kind || cmd.kind || 'unknown';
-      const cmdStr = JSON.stringify(cmd);
-      const truncatedCmd = cmdStr.length > 300 ? cmdStr.substring(0, 300) + '...' : cmdStr;
-      console.log(`Command ${idx}: type=${cmdType}, data=${truncatedCmd}`);
-    });
-    console.log('=== END PTB COMMANDS ===');
+    logPTBValidation(ptbData);
     
     // Validate NestedResult references before building PTB
     // This ensures no NestedResult references a command result index that doesn't exist
@@ -503,48 +639,6 @@ export class RebalanceService {
     logger.info(`✓ ZERO NestedResult[2] references found (collect_fee is side-effects only)`);
   }
   
-  /**
-   * Safe merge helper function for conditional coin merging.
-   * Only merges if the source coin exists (not undefined or null).
-   * 
-   * @param ptb - The Transaction builder
-   * @param destination - The destination coin to merge into
-   * @param source - The source coin to merge from (may be undefined/null)
-   */
-  private safeMerge(
-    ptb: Transaction,
-    destination: TransactionObjectArgument,
-    source: TransactionObjectArgument | undefined | null
-  ): void {
-    if (source !== undefined && source !== null) {
-      ptb.mergeCoins(destination, [source]);
-    }
-  }
-  
-  /**
-   * Safe transfer helper function for transferring objects with validation.
-   * Only calls transferObjects if moveCallResult exists and has at least one element.
-   * 
-   * This prevents errors from attempting to transfer undefined or missing objects,
-   * allowing transactions to complete gracefully even if expected results are not present.
-   * 
-   * Per requirements: checks moveCallResult && moveCallResult[0] before transferring
-   * 
-   * @param ptb - The Transaction builder
-   * @param moveCallResult - The result from a moveCall (can be array-like or single value)
-   * @param recipient - The recipient address to transfer to
-   */
-  private safeTransfer(
-    ptb: Transaction,
-    moveCallResult: TransactionObjectArgument | TransactionObjectArgument[] | any,
-    recipient: TransactionObjectArgument
-  ): void {
-    // Check if moveCallResult exists and has at least one element
-    // Matches specification: if (moveCallResult && moveCallResult[0])
-    if (moveCallResult && moveCallResult[0]) {
-      ptb.transferObjects([moveCallResult[0]], recipient);
-    }
-  }
   
   private addSwapIfNeeded(
     ptb: Transaction,
@@ -587,8 +681,8 @@ export class RebalanceService {
       const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
       
       // Use SDK builder pattern: router::swap
-      // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
-      const [swappedCoinA, remainderCoinB] = ptb.moveCall({
+      // Returns tuple (Coin<A>, Coin<B>) - extract safely without direct indexing
+      const swapResult = ptb.moveCall({
         target: `${packageId}::router::swap`,
         typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
         arguments: [
@@ -605,12 +699,16 @@ export class RebalanceService {
         ],
       });
       
+      // Extract results safely without direct indexing
+      const swappedCoinA = safeUseNestedResult(swapResult, 0, 'swapped coinA from router::swap');
+      const remainderCoinB = safeUseNestedResult(swapResult, 1, 'remainder coinB from router::swap');
+      
       // Swap was performed: reference the NestedResult output and merge
       // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinA) into coinA');
-      this.safeMerge(ptb, coinA, swappedCoinA);
+      safeMergeCoins(ptb, coinA, swappedCoinA, { description: 'swap output into coinA' });
       logger.debug('  Merging swap remainder (remainderCoinB) into coinB');
-      this.safeMerge(ptb, coinB, remainderCoinB);
+      safeMergeCoins(ptb, coinB, remainderCoinB, { description: 'swap remainder into coinB' });
       logger.info('  ✓ Swapped: coinB to coinA, output and remainder merged into stable coins');
       
       return { coinA, coinB };
@@ -629,8 +727,8 @@ export class RebalanceService {
       const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
       
       // Use SDK builder pattern: router::swap
-      // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
-      const [remainderCoinA, swappedCoinB] = ptb.moveCall({
+      // Returns tuple (Coin<A>, Coin<B>) - extract safely without direct indexing
+      const swapResult = ptb.moveCall({
         target: `${packageId}::router::swap`,
         typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
         arguments: [
@@ -647,12 +745,16 @@ export class RebalanceService {
         ],
       });
       
+      // Extract results safely without direct indexing
+      const remainderCoinA = safeUseNestedResult(swapResult, 0, 'remainder coinA from router::swap');
+      const swappedCoinB = safeUseNestedResult(swapResult, 1, 'swapped coinB from router::swap');
+      
       // Swap was performed: reference the NestedResult output and merge
       // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinB) into coinB');
-      this.safeMerge(ptb, coinB, swappedCoinB);
+      safeMergeCoins(ptb, coinB, swappedCoinB, { description: 'swap output into coinB' });
       logger.debug('  Merging swap remainder (remainderCoinA) into coinA');
-      this.safeMerge(ptb, coinA, remainderCoinA);
+      safeMergeCoins(ptb, coinA, remainderCoinA, { description: 'swap remainder into coinA' });
       logger.info('  ✓ Swapped: coinA to coinB, output and remainder merged into stable coins');
       
       return { coinA, coinB };

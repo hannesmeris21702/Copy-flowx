@@ -1,6 +1,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+// Initialize Sentry as early as possible for proper error tracking
+import { initSentry, captureException, flushSentry } from './utils/sentry';
+initSentry();
+
 import { loadConfig, validateConfig } from './config';
 import { logger } from './utils/logger';
 import { MonitoringBot } from './services/bot';
@@ -42,29 +46,37 @@ async function main(): Promise<void> {
     
     await bot.start();
     
-    process.on('SIGINT', () => {
+    process.on('SIGINT', async () => {
       logger.info('Received SIGINT signal');
       bot.stop();
+      await flushSentry();
       process.exit(0);
     });
     
-    process.on('SIGTERM', () => {
+    process.on('SIGTERM', async () => {
       logger.info('Received SIGTERM signal');
       bot.stop();
+      await flushSentry();
       process.exit(0);
     });
     
-    process.on('uncaughtException', (error: Error) => {
+    process.on('uncaughtException', async (error: Error) => {
       logger.error('Uncaught exception', error);
+      captureException(error);
+      await flushSentry();
       bot.stop();
       process.exit(1);
     });
     
-    process.on('unhandledRejection', (reason: unknown) => {
+    process.on('unhandledRejection', async (reason: unknown) => {
       logger.error('Unhandled rejection', { reason });
+      captureException(reason instanceof Error ? reason : new Error(String(reason)));
+      await flushSentry();
     });
   } catch (error) {
     logger.error('Fatal error starting bot', error);
+    captureException(error);
+    await flushSentry();
     process.exit(1);
   }
 }
