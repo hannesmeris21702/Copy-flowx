@@ -18,7 +18,7 @@ function getEnvVarWithDefault(name: string, defaultValue: string): string {
 export function loadConfig(): BotConfig {
   const privateKey = getEnvVar('PRIVATE_KEY');
   const poolId = getEnvVar('POOL_ID');
-  const positionId = getEnvVar('POSITION_ID');
+  const initialPositionId = process.env['POSITION_ID']; // Optional
   
   if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
     throw new Error('Invalid PRIVATE_KEY format. Must be 0x-prefixed 64 hex chars');
@@ -28,7 +28,8 @@ export function loadConfig(): BotConfig {
     throw new Error('Invalid POOL_ID format. Must be 0x-prefixed');
   }
   
-  if (!positionId.startsWith('0x')) {
+  // Validate POSITION_ID format only if provided
+  if (initialPositionId && !initialPositionId.startsWith('0x')) {
     throw new Error('Invalid POSITION_ID format. Must be 0x-prefixed');
   }
   
@@ -41,7 +42,7 @@ export function loadConfig(): BotConfig {
     privateKey,
     rpcUrl,
     poolId,
-    positionId,
+    initialPositionId: initialPositionId || undefined,
     rebalanceThresholdPercent: parseFloat(
       getEnvVarWithDefault('REBALANCE_THRESHOLD_PERCENT', '2.0')
     ),

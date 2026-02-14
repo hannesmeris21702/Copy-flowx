@@ -2,7 +2,7 @@ export interface BotConfig {
   privateKey: string;
   rpcUrl: string;
   poolId: string;
-  positionId: string;
+  initialPositionId?: string; // Optional: if provided, will monitor this position initially
   rebalanceThresholdPercent: number;
   rangeWidthPercent: number;
   checkIntervalMs: number;
