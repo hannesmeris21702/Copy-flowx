@@ -11,6 +11,8 @@ export interface BotConfig {
   minRetryDelayMs: number;
   maxRetryDelayMs: number;
   maxRetries: number;
+  swapRatioTolerancePercent: number;
+  stateFilePath?: string; // Optional path for state persistence file
 }
 
 export interface Position {
@@ -31,4 +33,30 @@ export interface Pool {
   currentTick: number;
   tickSpacing: number;
   feeRate: number;
+}
+
+// Rebalance state tracking
+export enum RebalanceState {
+  MONITORING = 'MONITORING',
+  POSITION_CLOSED = 'POSITION_CLOSED',
+  SWAP_COMPLETED = 'SWAP_COMPLETED',
+  POSITION_OPENED = 'POSITION_OPENED',
+  LIQUIDITY_ADDED = 'LIQUIDITY_ADDED',
+}
+
+export interface RebalanceStateData {
+  state: RebalanceState;
+  positionId: string;
+  poolId: string;
+  timestamp: string;
+  data?: {
+    availableA?: string;
+    availableB?: string;
+    totalValue?: string;
+    newPositionId?: string;
+    tickLower?: number;
+    tickUpper?: number;
+    swapExecuted?: boolean;
+    [key: string]: any;
+  };
 }

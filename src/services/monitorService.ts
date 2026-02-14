@@ -56,16 +56,13 @@ export class MonitorService {
     );
     
     // Determine if rebalancing should happen
+    // Rebalance when position is OUT_OF_RANGE (currentTick < tickLower OR currentTick > tickUpper)
     let shouldRebalance = false;
     let reason = 'Position is in range';
     
     if (!inRange) {
-      if (Math.abs(deviation) >= this.config.rebalanceThresholdPercent) {
-        shouldRebalance = true;
-        reason = `Price moved ${deviation.toFixed(2)}% outside range (threshold: ${this.config.rebalanceThresholdPercent}%)`;
-      } else {
-        reason = `Price out of range but deviation ${deviation.toFixed(2)}% below threshold ${this.config.rebalanceThresholdPercent}%`;
-      }
+      shouldRebalance = true;
+      reason = `Position OUT_OF_RANGE: current tick ${pool.currentTick} is outside [${position.tickLower}, ${position.tickUpper}]`;
     }
     
     const report: MonitorReport = {

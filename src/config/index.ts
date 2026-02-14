@@ -68,6 +68,10 @@ export function loadConfig(): BotConfig {
       10
     ),
     maxRetries: parseInt(getEnvVarWithDefault('MAX_RETRIES', '3'), 10),
+    swapRatioTolerancePercent: parseFloat(
+      getEnvVarWithDefault('SWAP_RATIO_TOLERANCE_PERCENT', '5.0')
+    ),
+    stateFilePath: getEnvVarWithDefault('STATE_FILE_PATH', '.rebalance-state.json'),
   };
   
   return config;
@@ -84,6 +88,10 @@ export function validateConfig(config: BotConfig): void {
   
   if (config.maxSlippagePercent <= 0 || config.maxSlippagePercent > 100) {
     throw new Error('MAX_SLIPPAGE_PERCENT must be between 0 and 100');
+  }
+  
+  if (config.swapRatioTolerancePercent < 0 || config.swapRatioTolerancePercent > 100) {
+    throw new Error('SWAP_RATIO_TOLERANCE_PERCENT must be between 0 and 100');
   }
   
   if (config.checkIntervalMs < 1000) {

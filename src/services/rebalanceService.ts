@@ -1,22 +1,20 @@
-import { Transaction, TransactionObjectArgument } from '@mysten/sui/transactions';
-import { SUI_CLOCK_OBJECT_ID } from '@mysten/sui/utils';
 import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
-import { BotConfig, Pool, Position } from '../types';
+import { BotConfig, Pool, Position, RebalanceState } from '../types';
 import { logger } from '../utils/logger';
-import { logPTBValidation } from '../utils/botLogger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
-import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
-import { PTBValidator } from '../utils/ptbValidator';
-import { PTBPreExecutionValidator } from '../utils/ptbPreExecutionValidator';
-import { safeMergeCoins, safeUseNestedResult } from '../utils/ptbHelpers';
-import {
-  calculateTickRange,
-  tickToSqrtPrice,
-  getAmountAFromLiquidity,
-  getAmountBFromLiquidity,
-} from '../utils/tickMath';
+import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount, calculateLiquidityAmounts } from '../utils/tickMath';
+import { StateManager } from '../utils/stateManager';
+import { 
+  logOutOfRangeDetection, 
+  logPositionClosed, 
+  logWalletBalances, 
+  logSwap, 
+  logOpenPosition, 
+  logAddLiquidity,
+  SwapDirection
+} from '../utils/botLogger';
 
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
@@ -26,6 +24,7 @@ export class RebalanceService {
   private suiClient: SuiClientService;
   private cetusService: CetusService;
   private config: BotConfig;
+  private stateManager: StateManager;
   
   constructor(
     suiClient: SuiClientService,
@@ -35,11 +34,34 @@ export class RebalanceService {
     this.suiClient = suiClient;
     this.cetusService = cetusService;
     this.config = config;
+    this.stateManager = new StateManager(config.stateFilePath);
   }
   
   async rebalance(pool: Pool, position: Position): Promise<void> {
     // Track current stage for error reporting
     let currentStage = 'rebalance_start';
+    
+    // Load existing state (if any) for resume capability
+    const existingState = this.stateManager.loadState();
+    let resumeState: RebalanceState = RebalanceState.MONITORING;
+    let stateData: any = {};
+    
+    if (existingState) {
+      // Validate that we're resuming the same position
+      if (existingState.positionId !== position.id || existingState.poolId !== pool.id) {
+        logger.warn('State file exists but for different position/pool - starting fresh');
+        logger.warn(`  State: ${existingState.positionId} vs Current: ${position.id}`);
+        this.stateManager.clearState();
+      } else {
+        resumeState = existingState.state;
+        stateData = existingState.data || {};
+        logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        logger.info('🔄 RESUMING FROM SAVED STATE');
+        logger.info(`   Current State: ${resumeState}`);
+        logger.info(`   Saved at: ${existingState.timestamp}`);
+        logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      }
+    }
     
     // Set Sentry context with pool and position metadata
     setSentryContext({
@@ -48,102 +70,518 @@ export class RebalanceService {
       stage: currentStage,
     });
     
-    addSentryBreadcrumb('Starting rebalance', 'rebalance', {
+    addSentryBreadcrumb('Starting position closure', 'rebalance', {
       poolId: pool.id,
       positionId: position.id,
       currentTick: pool.currentTick,
       positionRange: `[${position.tickLower}, ${position.tickUpper}]`,
+      resumeState: resumeState,
     });
     
     try {
-      logger.info('=== Starting Atomic PTB Rebalance ===');
+      logger.info('=== Starting Position Closure ===');
+      logger.info('Position is OUT_OF_RANGE - closing position and returning all funds to wallet');
+      
+      // Structured log for out-of-range detection
+      logOutOfRangeDetection({
+        currentTick: pool.currentTick,
+        tickLower: position.tickLower,
+        tickUpper: position.tickUpper,
+        positionId: position.id,
+        liquidity: position.liquidity.toString(),
+      });
       
       // Pre-execution validation
       currentStage = 'pre_execution_validation';
       setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
       await this.suiClient.checkGasPrice();
       
-      // Calculate new range with validated tick spacing
-      currentStage = 'calculate_range';
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-      const newRange = calculateTickRange(
-        pool.currentTick,
-        this.config.rangeWidthPercent,
-        pool.tickSpacing
-      );
-      
       logger.info(`Current tick: ${pool.currentTick}`);
-      logger.info(`Old range: [${position.tickLower}, ${position.tickUpper}]`);
-      logger.info(`New range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+      logger.info(`Position range: [${position.tickLower}, ${position.tickUpper}]`);
+      logger.info(`Position liquidity: ${position.liquidity}`);
       
-      addSentryBreadcrumb('Calculated new range', 'rebalance', {
-        oldRange: `[${position.tickLower}, ${position.tickUpper}]`,
-        newRange: `[${newRange.tickLower}, ${newRange.tickUpper}]`,
-      });
+      // Variables to track throughout rebalance
+      let availableA: bigint;
+      let availableB: bigint;
+      let totalValue: number;
+      let newRange: { tickLower: number; tickUpper: number };
+      let newPositionId: string;
+      const sqrtPrice = BigInt(pool.currentSqrtPrice);
       
-      // Validate tick spacing alignment
-      if (newRange.tickLower % pool.tickSpacing !== 0 || newRange.tickUpper % pool.tickSpacing !== 0) {
-        throw new Error('New range ticks not aligned to tick spacing');
+      // Close position - remove 100% liquidity, collect all fees, close NFT
+      // Skip if already completed (state >= POSITION_CLOSED)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.POSITION_CLOSED)) {
+        logger.info('⏭️  SKIPPING: Position already closed (resuming from saved state)');
+        
+        // Restore data from saved state
+        availableA = BigInt(stateData.availableA || '0');
+        availableB = BigInt(stateData.availableB || '0');
+        totalValue = parseFloat(stateData.totalValue || '0');
+        
+        logger.info(`   Restored availableA: ${availableA}`);
+        logger.info(`   Restored availableB: ${availableB}`);
+        logger.info(`   Restored totalValue: ${totalValue}`);
+      } else {
+        currentStage = 'close_position';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Closing position...');
+        logger.info('  - Removing 100% liquidity');
+        logger.info('  - Collecting all fees');
+        logger.info('  - Closing position NFT');
+        logger.info('  - Returning all coins to wallet');
+        
+        const closeResult = await this.closePosition(pool, position);
+        
+        // Structured log for position closure
+        logPositionClosed({
+          positionId: position.id,
+          poolId: pool.id,
+          success: true,
+          transactionDigest: closeResult?.digest,
+        });
+        
+        logger.info('✅ Position closed successfully');
+        logger.info('All coins have been returned to your wallet');
+        
+        // Query wallet balances after close_position confirmation
+        currentStage = 'query_balances';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Querying wallet balances...');
+        
+        availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+        availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+        
+        // Structured log for wallet balances
+        logWalletBalances({
+          tokenA: {
+            type: pool.coinTypeA,
+            balance: availableA.toString(),
+          },
+          tokenB: {
+            type: pool.coinTypeB,
+            balance: availableB.toString(),
+          },
+          context: 'After position close',
+        });
+        
+        logger.info('=== Wallet Balances (Available Liquidity) ===');
+        logger.info(`Token A (${pool.coinTypeA}):`);
+        logger.info(`  Available: ${availableA}`);
+        logger.info(`Token B (${pool.coinTypeB}):`);
+        logger.info(`  Available: ${availableB}`);
+        logger.info('These balances are the ONLY liquidity source for new position');
+        logger.info('============================================');
+        
+        // Calculate value using pool price data
+        currentStage = 'calculate_value';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Calculating total value using pool price data...');
+        
+        const { valueA, valueB, totalValue: calcTotalValue } = calculateQuoteValue(
+          availableA,
+          availableB,
+          sqrtPrice
+        );
+        
+        totalValue = calcTotalValue;
+        
+        logger.info('=== Portfolio Value (in terms of Token B) ===');
+        logger.info(`Value of Token A: ${valueA.toFixed(6)}`);
+        logger.info(`Value of Token B: ${valueB.toFixed(6)}`);
+        logger.info(`Total Value: ${totalValue.toFixed(6)}`);
+        logger.info('This totalValue MUST be preserved when opening new position');
+        logger.info('=============================================');
+        
+        // Save state: POSITION_CLOSED
+        this.stateManager.saveState({
+          state: RebalanceState.POSITION_CLOSED,
+          positionId: position.id,
+          poolId: pool.id,
+          timestamp: new Date().toISOString(),
+          data: {
+            availableA: availableA.toString(),
+            availableB: availableB.toString(),
+            totalValue: totalValue.toString(),
+          },
+        });
       }
       
-      // Calculate expected amounts with slippage protection
-      currentStage = 'calculate_amounts';
+      // Calculate new range for potential position reopening
+      currentStage = 'calculate_new_range';
       setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-      // FIXED: Use bigint arithmetic to avoid precision loss
-      const expectedAmounts = this.calculateExpectedAmounts(pool, position);
-      const slippagePercent = BigInt(Math.floor(this.config.maxSlippagePercent * 100)); // Convert to basis points
-      const minAmountA = (expectedAmounts.amountA * (BigInt(10000) - slippagePercent)) / BigInt(10000);
-      const minAmountB = (expectedAmounts.amountB * (BigInt(10000) - slippagePercent)) / BigInt(10000);
+      logger.info('Calculating new position range...');
       
-      logger.info(`Expected amounts: A=${expectedAmounts.amountA}, B=${expectedAmounts.amountB}`);
-      logger.info(`Min amounts (${this.config.maxSlippagePercent}% slippage): A=${minAmountA}, B=${minAmountB}`);
+      newRange = stateData.tickLower && stateData.tickUpper 
+        ? { tickLower: stateData.tickLower, tickUpper: stateData.tickUpper }
+        : calculateTickRange(
+            pool.currentTick,
+            this.config.rangeWidthPercent,
+            pool.tickSpacing
+          );
       
-      // Build single atomic PTB with pre-build validation
-      currentStage = 'build_ptb';
+      logger.info(`New range calculated: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+      
+      // Check if swap is required
+      currentStage = 'check_swap_required';
       setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-      addSentryBreadcrumb('Building PTB', 'rebalance', {
-        minAmountA: minAmountA.toString(),
-        minAmountB: minAmountB.toString(),
+      logger.info('Checking if swap is required...');
+      
+      const swapCheck = checkSwapRequired(
+        availableA,
+        availableB,
+        sqrtPrice,
+        newRange.tickLower,
+        newRange.tickUpper,
+        this.config.swapRatioTolerancePercent
+      );
+      
+      logger.info('=== Swap Requirement Analysis ===');
+      logger.info(`Optimal Ratio (A/B): ${swapCheck.optimalRatio === Infinity ? 'Infinity (only A needed)' : swapCheck.optimalRatio.toFixed(6)}`);
+      logger.info(`Available Ratio (A/B): ${swapCheck.availableRatio === Infinity ? 'Infinity (only A available)' : swapCheck.availableRatio.toFixed(6)}`);
+      logger.info(`Ratio Mismatch: ${swapCheck.ratioMismatchPercent.toFixed(2)}%`);
+      logger.info(`Tolerance: ${this.config.swapRatioTolerancePercent}%`);
+      logger.info(`Swap Required: ${swapCheck.swapRequired ? 'YES' : 'NO'}`);
+      logger.info(`Reason: ${swapCheck.reason}`);
+      logger.info('=================================');
+      
+      // Execute swap if required
+      // Skip if already completed (state >= SWAP_COMPLETED)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.SWAP_COMPLETED)) {
+        logger.info('⏭️  SKIPPING: Swap already completed (resuming from saved state)');
+        
+        // Restore data from saved state  
+        if (stateData.swapExecuted) {
+          availableA = BigInt(stateData.availableA || '0');
+          availableB = BigInt(stateData.availableB || '0');
+          
+          logger.info(`   Restored availableA: ${availableA}`);
+          logger.info(`   Restored availableB: ${availableB}`);
+        }
+      } else if (swapCheck.swapRequired) {
+        currentStage = 'execute_swap';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Swap is required - executing swap...');
+        
+        // Calculate swap amount
+        const currentPrice = sqrtPriceToPrice(sqrtPrice);
+        const swapDetails = calculateSwapAmount(
+          availableA,
+          availableB,
+          swapCheck.optimalRatio,
+          currentPrice
+        );
+        
+        if (!swapDetails) {
+          logger.error('Unable to calculate swap amount');
+          throw new Error('Failed to calculate swap amount to achieve optimal ratio');
+        }
+        
+        logger.info('=== Swap Details ===');
+        logger.info(`Direction: ${swapDetails.swapFromA ? 'Token A → Token B' : 'Token B → Token A'}`);
+        logger.info(`Swap Amount: ${swapDetails.swapAmount}`);
+        logger.info(`Expected Output: ${swapDetails.expectedOutput}`);
+        logger.info('====================');
+        
+        // Execute swap
+        const swapResult = await this.executeSwap(
+          pool,
+          swapDetails.swapFromA,
+          swapDetails.swapAmount,
+          this.config.maxSlippagePercent
+        );
+        
+        // Structured log for swap execution (reuse currentPrice from above)
+        logSwap({
+          direction: swapDetails.swapFromA ? SwapDirection.A_TO_B : SwapDirection.B_TO_A,
+          reason: swapCheck.reason,
+          inputAmount: swapDetails.swapAmount.toString(),
+          outputAmount: swapDetails.expectedOutput.toString(),
+          price: currentPrice.toFixed(6),
+          slippage: this.config.maxSlippagePercent.toString(),
+          transactionDigest: swapResult?.digest,
+        });
+        
+        addSentryBreadcrumb('Swap executed', 'rebalance', {
+          positionId: position.id,
+          swapFromA: swapDetails.swapFromA,
+          swapAmount: swapDetails.swapAmount.toString(),
+          expectedOutput: swapDetails.expectedOutput.toString(),
+        });
+        
+        // Refresh wallet balances after swap
+        currentStage = 'refresh_balances_after_swap';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Refreshing wallet balances after swap...');
+        
+        availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+        availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+        
+        logger.info('=== Updated Wallet Balances ===');
+        logger.info(`Token A: ${availableA}`);
+        logger.info(`Token B: ${availableB}`);
+        
+        // Recalculate value after swap
+        const { valueA: newValueA, valueB: newValueB, totalValue: newTotalValue } = calculateQuoteValue(
+          availableA,
+          availableB,
+          sqrtPrice
+        );
+        
+        logger.info('=== Updated Portfolio Value ===');
+        logger.info(`Value of Token A: ${newValueA.toFixed(6)}`);
+        logger.info(`Value of Token B: ${newValueB.toFixed(6)}`);
+        logger.info(`Total Value: ${newTotalValue.toFixed(6)}`);
+        logger.info(`Value preserved: ${Math.abs(newTotalValue - totalValue) < 0.01 * totalValue ? 'YES' : 'NO (within slippage)'}`);
+        logger.info('================================');
+        
+        addSentryBreadcrumb('Balances refreshed after swap', 'rebalance', {
+          positionId: position.id,
+          newAvailableA: availableA.toString(),
+          newAvailableB: availableB.toString(),
+          newTotalValue: newTotalValue.toString(),
+        });
+        
+        // Save state: SWAP_COMPLETED
+        this.stateManager.saveState({
+          state: RebalanceState.SWAP_COMPLETED,
+          positionId: position.id,
+          poolId: pool.id,
+          timestamp: new Date().toISOString(),
+          data: {
+            availableA: availableA.toString(),
+            availableB: availableB.toString(),
+            totalValue: totalValue.toString(),
+            tickLower: newRange.tickLower,
+            tickUpper: newRange.tickUpper,
+            swapExecuted: true,
+          },
+        });
+      } else {
+        logger.info('No swap required - token ratio is acceptable');
+        
+        // Save state: SWAP_COMPLETED (even though no swap was done)
+        this.stateManager.saveState({
+          state: RebalanceState.SWAP_COMPLETED,
+          positionId: position.id,
+          poolId: pool.id,
+          timestamp: new Date().toISOString(),
+          data: {
+            availableA: availableA.toString(),
+            availableB: availableB.toString(),
+            totalValue: totalValue.toString(),
+            tickLower: newRange.tickLower,
+            tickUpper: newRange.tickUpper,
+            swapExecuted: false,
+          },
+        });
+      }
+      
+      // Open new position
+      // Skip if already completed (state >= POSITION_OPENED)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.POSITION_OPENED)) {
+        logger.info('⏭️  SKIPPING: Position already opened (resuming from saved state)');
+        
+        // Restore data from saved state
+        newPositionId = stateData.newPositionId || '';
+        
+        logger.info(`   Restored newPositionId: ${newPositionId}`);
+        
+        if (!newPositionId) {
+          throw new Error('State indicates position opened but newPositionId not found in state data');
+        }
+      } else {
+        currentStage = 'open_position';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Opening new position...');
+        
+        const openResult = await this.openPosition(
+          pool,
+          newRange.tickLower,
+          newRange.tickUpper
+        );
+        
+        newPositionId = openResult.positionId;
+        
+        // Structured log for position opening
+        logOpenPosition({
+          poolId: pool.id,
+          positionId: newPositionId,
+          tickLower: newRange.tickLower,
+          tickUpper: newRange.tickUpper,
+          success: true,
+          transactionDigest: openResult.digest,
+        });
+        
+        logger.info('=== New Position Created ===');
+        logger.info(`Position ID: ${newPositionId}`);
+        logger.info(`Tick range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+        logger.info('============================');
+        
+        addSentryBreadcrumb('New position opened', 'rebalance', {
+          oldPositionId: position.id,
+          newPositionId: newPositionId,
+          tickLower: newRange.tickLower,
+          tickUpper: newRange.tickUpper,
+        });
+        
+        // Save state: POSITION_OPENED
+        this.stateManager.saveState({
+          state: RebalanceState.POSITION_OPENED,
+          positionId: position.id,
+          poolId: pool.id,
+          timestamp: new Date().toISOString(),
+          data: {
+            availableA: availableA.toString(),
+            availableB: availableB.toString(),
+            totalValue: totalValue.toString(),
+            tickLower: newRange.tickLower,
+            tickUpper: newRange.tickUpper,
+            newPositionId: newPositionId,
+            swapExecuted: stateData.swapExecuted || false,
+          },
+        });
+      }
+      
+      // Add liquidity to the new position
+      // Skip if already completed (state >= LIQUIDITY_ADDED)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.LIQUIDITY_ADDED)) {
+        logger.info('⏭️  SKIPPING: Liquidity already added (resuming from saved state)');
+        logger.info('   Rebalance was already completed - clearing state');
+        
+        // Clear state and return
+        this.stateManager.clearState();
+        
+        logger.info('=== Rebalance Already Complete ===');
+        logger.info(`Old Position: ${position.id} (CLOSED)`);
+        logger.info(`New Position: ${newPositionId} (OPENED with liquidity)`);
+        logger.info('===================================');
+        
+        return;
+      }
+      
+      currentStage = 'add_liquidity';
+      setSentryContext({ poolId: pool.id, positionId: newPositionId, stage: currentStage });
+      
+      // Calculate optimal liquidity amounts
+      // This ensures we don't exceed available balances and leave dust if needed
+      // Use the current availableA and availableB (already updated if swap was executed)
+      const liquidityAmounts = calculateLiquidityAmounts(
+        availableA,
+        availableB,
+        sqrtPrice,
+        newRange.tickLower,
+        newRange.tickUpper
+      );
+      
+      logger.info('Adding liquidity to position...');
+      logger.info(`  Using Token A: ${liquidityAmounts.amountA.toString()}`);
+      logger.info(`  Using Token B: ${liquidityAmounts.amountB.toString()}`);
+      
+      // Add liquidity to the position
+      const liquidityResult = await this.addLiquidity(
+        newPositionId,
+        pool,
+        newRange.tickLower,
+        newRange.tickUpper,
+        liquidityAmounts.amountA,
+        liquidityAmounts.amountB,
+        this.config.maxSlippagePercent
+      );
+      
+      // Structured log for liquidity addition
+      logAddLiquidity({
+        positionId: newPositionId,
+        amountA: liquidityAmounts.amountA.toString(),
+        amountB: liquidityAmounts.amountB.toString(),
+        success: true,
+        transactionDigest: liquidityResult?.digest,
       });
       
-      // @copilot PTB validation happens inside buildRebalancePTB to catch errors early
-      const ptb = await this.buildRebalancePTB(pool, position, newRange, minAmountA, minAmountB);
+      // Refresh balances to show what's left (dust)
+      const dustA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+      const dustB = await this.suiClient.getWalletBalance(pool.coinTypeB);
       
-      // Log PTB structure for debugging (helps with SecondaryIndexOutOfBounds)
-      PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
+      logger.info('=== Final Wallet Balances (After Liquidity) ===');
+      logger.info(`Token A (${pool.coinTypeA.substring(0, 20)}...): ${dustA.toString()} (dust remaining)`);
+      logger.info(`Token B (${pool.coinTypeB.substring(0, 20)}...): ${dustB.toString()} (dust remaining)`);
+      logger.info('=================================================');
       
-      // CRITICAL: Pre-execution validation before submitting PTB
-      // Validates:
-      // 1. All NestedResult references point to valid commands
-      // 2. open_position return is handled safely
-      // 3. add_liquidity coin inputs exist
-      // Throws descriptive errors early if validation fails
-      logger.info('Running pre-execution PTB validation...');
-      PTBPreExecutionValidator.validateBeforeExecution(ptb);
-      logger.info('✅ Pre-execution validation passed - PTB is safe to execute');
+      // Calculate final portfolio value to verify preservation
+      const { totalValue: liquidityTotalValue } = calculateQuoteValue(
+        liquidityAmounts.amountA,
+        liquidityAmounts.amountB,
+        sqrtPrice
+      );
       
-      // Execute atomically (single execution)
-      currentStage = 'execute_ptb';
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-      addSentryBreadcrumb('Executing PTB', 'rebalance', {
-        poolId: pool.id,
+      const { totalValue: dustTotalValue } = calculateQuoteValue(
+        dustA,
+        dustB,
+        sqrtPrice
+      );
+      
+      const finalTotalValue = liquidityTotalValue + dustTotalValue;
+      
+      logger.info('=== Final Portfolio Value ===');
+      logger.info(`Value in Position: ${liquidityTotalValue.toFixed(6)}`);
+      logger.info(`Value in Wallet (dust): ${dustTotalValue.toFixed(6)}`);
+      logger.info(`Total Value: ${finalTotalValue.toFixed(6)}`);
+      logger.info(`Original Total Value: ${totalValue.toFixed(6)}`);
+      
+      // Check if value is preserved (within 1% tolerance to account for slippage and rounding)
+      const valuePreserved = Math.abs(finalTotalValue - totalValue) < 0.01 * totalValue;
+      logger.info(`Value Preserved: ${valuePreserved ? 'YES' : 'NO (within 1% tolerance)'}`);
+      logger.info('==============================');
+      
+      addSentryBreadcrumb('Liquidity added to position', 'rebalance', {
+        positionId: newPositionId,
+        amountA: liquidityAmounts.amountA.toString(),
+        amountB: liquidityAmounts.amountB.toString(),
+        dustA: dustA.toString(),
+        dustB: dustB.toString(),
+        finalTotalValue: finalTotalValue.toString(),
+        originalTotalValue: totalValue.toString(),
+        valuePreserved: valuePreserved,
+      });
+      
+      addSentryBreadcrumb('Swap requirement checked', 'rebalance', {
+        positionId: position.id,
+        swapRequired: swapCheck.swapRequired,
+        optimalRatio: swapCheck.optimalRatio.toString(),
+        availableRatio: swapCheck.availableRatio.toString(),
+        ratioMismatchPercent: swapCheck.ratioMismatchPercent.toString(),
+        newRangeLower: newRange.tickLower,
+        newRangeUpper: newRange.tickUpper,
+      });
+      
+      addSentryBreadcrumb('Position closed successfully', 'rebalance', {
         positionId: position.id,
       });
       
-      logger.info('Executing atomic PTB...');
-      const result = await this.suiClient.executeTransactionWithoutSimulation(ptb);
+      logger.info('=== Rebalance Complete ===');
+      logger.info(`Old Position: ${position.id} (CLOSED)`);
+      logger.info(`New Position: ${newPositionId} (OPENED with liquidity)`);
+      logger.info('===========================');
       
-      addSentryBreadcrumb('Rebalance completed successfully', 'rebalance', {
-        digest: result.digest,
+      // Save state: LIQUIDITY_ADDED (final state before clearing)
+      this.stateManager.saveState({
+        state: RebalanceState.LIQUIDITY_ADDED,
+        positionId: position.id,
+        poolId: pool.id,
+        timestamp: new Date().toISOString(),
+        data: {
+          newPositionId: newPositionId,
+          valuePreserved: valuePreserved,
+        },
       });
       
-      logger.info(`✅ Rebalance successful! Digest: ${result.digest}`);
-      logger.info('=== Atomic PTB Rebalance Complete ===');
+      // Clear state - rebalance complete, return to MONITORING
+      this.stateManager.clearState();
+
       
     } catch (error) {
       // Use error explainer to provide clear guidance
       logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      logger.error('❌ REBALANCE EXECUTION FAILED');
+      logger.error('❌ POSITION CLOSURE FAILED');
       logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       
       const explained = explainError(error as Error);
@@ -192,439 +630,212 @@ export class RebalanceService {
     }
   }
   
-  private calculateExpectedAmounts(pool: Pool, position: Position): { amountA: bigint; amountB: bigint } {
-    const sqrtPriceCurrent = BigInt(pool.currentSqrtPrice);
-    const sqrtPriceLower = tickToSqrtPrice(position.tickLower);
-    const sqrtPriceUpper = tickToSqrtPrice(position.tickUpper);
-    const liquidity = BigInt(position.liquidity);
-    
-    // Determine which tokens we'll get based on current price relative to range
-    let amountA: bigint;
-    let amountB: bigint;
-    
-    if (sqrtPriceCurrent <= sqrtPriceLower) {
-      // Current price below range - all token A
-      amountA = getAmountAFromLiquidity(sqrtPriceLower, sqrtPriceUpper, liquidity);
-      amountB = BigInt(0);
-    } else if (sqrtPriceCurrent >= sqrtPriceUpper) {
-      // Current price above range - all token B
-      amountA = BigInt(0);
-      amountB = getAmountBFromLiquidity(sqrtPriceLower, sqrtPriceUpper, liquidity);
-    } else {
-      // Current price in range - both tokens
-      amountA = getAmountAFromLiquidity(sqrtPriceCurrent, sqrtPriceUpper, liquidity);
-      amountB = getAmountBFromLiquidity(sqrtPriceLower, sqrtPriceCurrent, liquidity);
-    }
-    
-    return { amountA, amountB };
-  }
-  
-  private async buildRebalancePTB(
+  /**
+   * Close position using Cetus SDK
+   * Removes 100% liquidity, collects all fees, and closes position NFT
+   * All coins are returned to wallet
+   */
+  private async closePosition(
     pool: Pool,
-    position: Position,
-    newRange: { tickLower: number; tickUpper: number },
-    minAmountA: bigint,
-    minAmountB: bigint
-  ): Promise<Transaction> {
-    const ptb = new Transaction();
-    
-    // Set sender to enable proper gas coin handling
-    // This prevents "Encountered unexpected token when parsing type args for gas" error
-    ptb.setSender(this.suiClient.getAddress());
-    
+    position: Position
+  ): Promise<{ digest?: string }> {
     const sdk = this.cetusService.getSDK();
     
-    logger.info('Building atomic PTB with all operations using SDK builders...');
-    logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: close_position (capture outputs) → swap → open → add_liquidity → transfer');
-    
-    // CHECK: Validate position liquidity before building PTB
-    const positionHasLiquidity = BigInt(position.liquidity) > BigInt(0);
-    logger.info(`Position liquidity check: ${position.liquidity} (has liquidity: ${positionHasLiquidity})`);
-    
-    // Get SDK configuration
-    const packageId = sdk.sdkOptions.integrate.published_at;
-    const globalConfigId = sdk.sdkOptions.clmm_pool.config!.global_config_id;
-    
-    // Normalize type arguments to prevent parsing errors
-    const normalizedTypeArgs = normalizeTypeArguments([
-      pool.coinTypeA,
-      pool.coinTypeB
-    ]);
-    const normalizedCoinTypeA = normalizedTypeArgs[0];
-    const normalizedCoinTypeB = normalizedTypeArgs[1];
-    
-    if (!normalizedCoinTypeA || !normalizedCoinTypeB) {
-      throw new Error('Type argument normalization failed: missing normalized types');
-    }
-    
-    logger.debug(`Type args normalized: A=${normalizedCoinTypeA}, B=${normalizedCoinTypeB}`);
-    
-    // Validate that type arguments are properly normalized
-    if (!validateTypeArguments([normalizedCoinTypeA, normalizedCoinTypeB])) {
-      throw new Error(
-        'Type argument normalization validation failed. ' +
-        'Type arguments could not be properly normalized using TypeTagSerializer.'
-      );
-    }
-    logger.debug('Type argument validation passed');
-    
-    // ============================================================================
-    // COIN TRACE: PTB Command Flow with Explicit Result Labels
-    // ============================================================================
-    // Step 1: Close position (removes liquidity AND closes position NFT)
-    // CORRECT APPROACH: Capture the returned coins from close_position
-    // close_position returns (Coin<CoinTypeA>, Coin<CoinTypeB>) - tuple of 2 coins
-    // These coins contain the actual liquidity from the closed position
-    // ============================================================================
-    logger.info('Step 1: Close position (removes liquidity & closes NFT) → capturing returned coins');
-    
-    // Command 0: close_position moveCall
-    // IMPORTANT: This returns a tuple (Coin<A>, Coin<B>) containing the position's liquidity
-    // We MUST capture these outputs and use them as the liquidity source
-    const closePositionResult = ptb.moveCall({
-      target: `${packageId}::pool_script::close_position`,
-      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-      arguments: [
-        ptb.object(globalConfigId),
-        ptb.object(pool.id),
-        ptb.object(position.id),
-        ptb.pure.u64(minAmountA.toString()),
-        ptb.pure.u64(minAmountB.toString()),
-        ptb.object(SUI_CLOCK_OBJECT_ID),
-      ],
+    // Build the close position transaction using Cetus SDK
+    // Set min_amount_a and min_amount_b to '0' to remove 100% liquidity
+    const tx = await sdk.Position.closePositionTransactionPayload({
+      coinTypeA: pool.coinTypeA,
+      coinTypeB: pool.coinTypeB,
+      pool_id: pool.id,
+      pos_id: position.id,
+      min_amount_a: '0', // Remove 100% liquidity - no minimum
+      min_amount_b: '0', // Remove 100% liquidity - no minimum
+      collect_fee: true, // Collect all fees
+      rewarder_coin_types: [], // No rewarder coins
     });
     
-    // Extract the returned coins from close_position
-    // These coins contain the actual liquidity and will be used for swaps
-    const stableCoinA = safeUseNestedResult(
-      closePositionResult,
-      0,
-      'coinA from close_position'
-    );  // Command 0, index 0: Coin<CoinTypeA>
-    const stableCoinB = safeUseNestedResult(
-      closePositionResult,
-      1,
-      'coinB from close_position'
-    );  // Command 0, index 1: Coin<CoinTypeB>
-    logger.info('  ✓ close_position completed - captured returned coins (Coin<A>, Coin<B>)');
-    logger.info('  ✓ Using close_position outputs as liquidity source for swaps');
-    
-    // Step 2: Swap to optimal ratio if needed
-    logger.info('Step 2: Swap to optimal ratio (if needed)');
-    const { coinA: swappedCoinA, coinB: swappedCoinB } = this.addSwapIfNeeded(
-      ptb,
-      pool,
-      newRange,
-      stableCoinA,
-      stableCoinB,
-      packageId,
-      globalConfigId,
-      normalizedCoinTypeA,
-      normalizedCoinTypeB,
-      positionHasLiquidity  // Pass this to help determine if we have coins to swap
-    );
-    logger.info('  ✓ Final coins ready after swap: swappedCoinA, swappedCoinB');
-    
-    // Step 3: Open new position
-    // Use SDK builder pattern with proper tick conversion from SDK's asUintN
-    logger.info('Step 3: Open new position → returns newPosition NFT');
-    
-    // Convert signed ticks to u32 using BigInt.asUintN (SDK pattern)
-    const tickLowerU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickLower)));
-    const tickUpperU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickUpper)));
-    
-    // NOTE: open_position returns a SINGLE Position NFT object (not a tuple)
-    // Per Cetus pool_script Move contract: public fun open_position(...): Position
-    // This is a public function (not entry), so it returns a value
-    // Do NOT use array destructuring or access [0] - it causes SecondaryIndexOutOfBounds error
-    // The moveCall result itself IS the Position NFT
-    const newPosition = ptb.moveCall({
-      target: `${packageId}::pool_script::open_position`,
-      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-      arguments: [
-        ptb.object(globalConfigId),
-        ptb.object(pool.id),
-        ptb.pure.u32(tickLowerU32),
-        ptb.pure.u32(tickUpperU32),
-      ],
-    });
-    
-    logger.info('  ✓ Captured: newPosition NFT from open_position (single value return)');
-    
-    // ============================================================================
-    // Step 4: Validate coins before add_liquidity_by_fix_coin
-    // Ensure both coinA and coinB exist from close_position outputs
-    // ============================================================================
-    logger.info('Step 4: Validate coins for add_liquidity');
-    
-    // Note: close_position always returns valid coin objects (not null/undefined),
-    // even if the position has no liquidity (in which case coins will have zero balance).
-    // The swappedCoinA and swappedCoinB come from either:
-    // 1. Direct use of close_position outputs if no swap needed
-    // 2. Swap outputs that use close_position outputs as inputs
-    // If either coin object is missing (null/undefined), it indicates a bug in either 
-    // close_position capture or swap logic.
-    if (!swappedCoinA || !swappedCoinB) {
-      // This should not happen under normal operation since close_position
-      // always returns valid coin objects (though they may have zero balance if position was empty).
-      // If we hit this, coin objects themselves are missing, which indicates a bug.
-      const missingCoins = `${!swappedCoinA ? 'coinA ' : ''}${!swappedCoinB ? 'coinB' : ''}`.trim();
-      throw new Error(
-        `Missing required coin(s): ${missingCoins}. ` +
-        'This indicates a bug in close_position output capture or swap logic.'
-      );
-    }
-    
-    logger.info('  ✓ Both coins validated: swappedCoinA and swappedCoinB ready');
-    
-    // Step 5: Add liquidity to new position
-    // NOTE: Under normal operation, open_position returns a valid position NFT
-    // If open_position fails, the entire PTB transaction will revert atomically
-    // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-    logger.info('Step 5: Add liquidity → consumes swappedCoinA, swappedCoinB');
-    
-    ptb.moveCall({
-      target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
-      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-      arguments: [
-        ptb.object(globalConfigId),
-        ptb.object(pool.id),
-        newPosition,
-        swappedCoinA,
-        swappedCoinB,
-        ptb.pure.u64(minAmountA.toString()),
-        ptb.pure.u64(minAmountB.toString()),
-        ptb.pure.bool(true), // fix_amount_a
-        ptb.object(SUI_CLOCK_OBJECT_ID),
-      ],
-    });
-    logger.info('  ✓ Liquidity added, coins consumed');
-    
-    // Step 6: Transfer new position NFT to sender
-    // NOTE: Direct transferObjects is safe here because:
-    // 1. newPosition is a PTB reference (always valid during construction)
-    // 2. If open_position fails, the entire PTB reverts atomically
-    // 3. Sui PTB framework validates all object references during execution
-    logger.info('Step 6: Transfer newPosition NFT to sender');
-    ptb.transferObjects([newPosition], ptb.pure.address(this.suiClient.getAddress()));
-    logger.info('  ✓ Position transferred');
-    
-    logger.info('=== END COIN OBJECT FLOW TRACE ===');
-    logger.info('Flow: close_position (capture outputs) → swap (if needed) → open → add_liquidity → transfer');
-    logger.info('ALL LIQUIDITY FROM close_position RETURNED COINS');
-    logger.info('CORRECT APPROACH: Using actual liquidity coins, not zero coins');
-    
-    // Add PTB validation: Print commands with detailed info before build
-    // Log 'Command ${i}: ${txb.getEffects()}' as requested in problem statement
-    // Note: getEffects() is not available pre-build, so we log command structure
-    const ptbData = ptb.getData();
-    logPTBValidation(ptbData);
-    
-    // Validate NestedResult references before building PTB
-    // This ensures no NestedResult references a command result index that doesn't exist
-    // After fix: All NestedResult references should point to close_position outputs (Command 0)
-    this.validateNestedResultReferences(ptb);
-    
-    logger.info('✅ PTB Dry-run PASSED - validation complete');
-    
-    return ptb;
+    // Execute the transaction and wait for confirmation
+    // Coins are automatically returned to wallet (no return value capture)
+    const result = await this.suiClient.executeSDKPayload(tx);
+    return { digest: result.digest };
   }
   
   /**
-   * Validates that all NestedResult references in the PTB point to valid command indices.
-   * This prevents invalid PTB construction where a NestedResult references a command
-   * that doesn't exist or hasn't been executed yet.
-   * 
-   * After the fix: All NestedResult references should point to close_position outputs (Command 0).
-   * 
-   * @param ptb - The Transaction to validate
-   * @throws Error if any NestedResult references an invalid command index (out of bounds or future command)
+   * Execute a token swap using Cetus SDK
+   * Swaps tokens to achieve optimal ratio for new position
    */
-  private validateNestedResultReferences(ptb: Transaction): void {
-    const ptbData = ptb.getData();
-    const totalCommands = ptbData.commands.length;
+  private async executeSwap(
+    pool: Pool,
+    swapFromA: boolean,
+    swapAmount: bigint,
+    slippagePercent: number
+  ): Promise<{ digest?: string }> {
+    const sdk = this.cetusService.getSDK();
     
-    logger.debug(`Validating NestedResult references in PTB with ${totalCommands} commands`);
+    logger.info('Executing swap...');
+    logger.info(`  Direction: ${swapFromA ? 'A → B' : 'B → A'}`);
+    logger.info(`  Amount: ${swapAmount}`);
+    logger.info(`  Slippage: ${slippagePercent}%`);
     
-    // Helper function to recursively check for NestedResult in an object
-    const checkForNestedResult = (obj: unknown, currentCommandIdx: number, path: string = ''): void => {
-      if (!obj || typeof obj !== 'object') {
-        return;
-      }
-      
-      // Check if this is a NestedResult
-      if (typeof obj === 'object' && obj !== null && '$kind' in obj && obj.$kind === 'NestedResult' && 'NestedResult' in obj && Array.isArray(obj.NestedResult)) {
-        const [commandIndex, resultIndex] = obj.NestedResult;
-        
-        // Validate that the referenced command index exists and comes before current command
-        if (commandIndex < 0 || commandIndex >= totalCommands) {
-          throw new Error(
-            `Invalid NestedResult reference at ${path}: ` +
-            `references command ${commandIndex} but only ${totalCommands} commands exist. ` +
-            `NestedResult: [${commandIndex}, ${resultIndex}]`
-          );
-        }
-        
-        // Additional check: referenced command should come before the command using it
-        if (commandIndex >= currentCommandIdx) {
-          throw new Error(
-            `Invalid NestedResult reference at ${path}: ` +
-            `command ${currentCommandIdx} references future command ${commandIndex}. ` +
-            `NestedResult: [${commandIndex}, ${resultIndex}]`
-          );
-        }
-        
-        logger.debug(`  ✓ Valid NestedResult at ${path}: [${commandIndex}, ${resultIndex}]`);
-      }
-      
-      // Recursively check all properties
-      if (Array.isArray(obj)) {
-        obj.forEach((item, idx) => {
-          checkForNestedResult(item, currentCommandIdx, path ? `${path}[${idx}]` : `[${idx}]`);
-        });
-      } else {
-        Object.keys(obj).forEach(key => {
-          if (key !== '$kind') { // Skip the $kind marker
-            const value = (obj as Record<string, unknown>)[key];
-            checkForNestedResult(value, currentCommandIdx, path ? `${path}.${key}` : key);
-          }
-        });
-      }
-    };
+    // Calculate amount limit based on slippage
+    // For swap in, we get less output so we need minimum output
+    // amount_limit = expectedOutput * (1 - slippage)
+    const slippageFactor = 1 - slippagePercent / 100;
+    const amountLimit = BigInt(Math.floor(Number(swapAmount) * slippageFactor));
     
-    // Check each command for NestedResult references
-    ptbData.commands.forEach((cmd: unknown, idx: number) => {
-      checkForNestedResult(cmd, idx, `Command[${idx}]`);
+    // Build the swap transaction using Cetus SDK
+    // a2b = true means swap A to B, false means swap B to A
+    const tx = await sdk.Swap.createSwapTransactionPayload({
+      pool_id: pool.id,
+      coinTypeA: pool.coinTypeA,
+      coinTypeB: pool.coinTypeB,
+      a2b: swapFromA,
+      by_amount_in: true,
+      amount: swapAmount.toString(),
+      amount_limit: amountLimit.toString(),
     });
     
-    logger.info(`✓ PTB validation passed: all NestedResult references are valid`);
+    // Execute the transaction and wait for confirmation
+    const result = await this.suiClient.executeSDKPayload(tx);
+    
+    logger.info('✅ Swap executed successfully');
+    return { digest: result.digest };
   }
   
-  
-  private addSwapIfNeeded(
-    ptb: Transaction,
+  /**
+   * Open a new position using Cetus SDK
+   * Creates position NFT without adding liquidity
+   * @returns Object with position ID and transaction digest
+   */
+  private async openPosition(
     pool: Pool,
-    newRange: { tickLower: number; tickUpper: number },
-    coinA: TransactionObjectArgument,
-    coinB: TransactionObjectArgument,
-    packageId: string,
-    globalConfigId: string,
-    normalizedCoinTypeA: string,
-    normalizedCoinTypeB: string,
-    positionHasLiquidity: boolean
-  ): { coinA: TransactionObjectArgument; coinB: TransactionObjectArgument } {
-    // Calculate optimal ratio for new range
-    const sqrtPriceCurrent = BigInt(pool.currentSqrtPrice);
-    const sqrtPriceLower = tickToSqrtPrice(newRange.tickLower);
-    const sqrtPriceUpper = tickToSqrtPrice(newRange.tickUpper);
+    tickLower: number,
+    tickUpper: number
+  ): Promise<{ positionId: string; digest?: string }> {
+    const sdk = this.cetusService.getSDK();
     
-    // Sqrt price limits for swaps (from Cetus SDK)
-    const MIN_SQRT_PRICE = '4295048016';
-    const MAX_SQRT_PRICE = '79226673515401279992447579055';
+    logger.info('Opening new position...');
+    logger.info(`  Tick range: [${tickLower}, ${tickUpper}]`);
+    logger.info(`  Pool: ${pool.id}`);
     
-    // Maximum u64 value for swap amount
-    const U64_MAX = '18446744073709551615';
+    // Build the open position transaction using Cetus SDK
+    // This creates the position NFT without adding liquidity
+    const tx = await sdk.Position.openPositionTransactionPayload({
+      pool_id: pool.id,
+      coinTypeA: pool.coinTypeA,
+      coinTypeB: pool.coinTypeB,
+      tick_lower: tickLower.toString(),
+      tick_upper: tickUpper.toString(),
+    });
     
-    if (sqrtPriceCurrent < sqrtPriceLower) {
-      // Price below range - need token A, swap B to A
-      logger.info('  Price below new range - need to swap coinB to coinA');
-      
-      // CHECK: Only perform swap if we have liquidity (and thus coins to swap)
-      // Per Cetus SDK pattern: don't call swap with zero amounts
-      // If position has no liquidity, we have coins from close_position
-      // In this case, skip the swap entirely if coins have zero balance
-      if (!positionHasLiquidity) {
-        logger.warn('  ⚠ Skipping swap: position has no liquidity, coins likely have zero balance');
-        logger.info('  Using coins as-is (no swap performed)');
-        return { coinA, coinB };
-      }
-      
-      // Use actual coins from close_position directly (modern Sui SDK pattern)
-      // No need to create zero coins - swap will use and return the actual coins
-      // Use SDK builder pattern: router::swap
-      // Returns tuple (Coin<A>, Coin<B>) - extract safely without direct indexing
-      const swapResult = ptb.moveCall({
-        target: `${packageId}::router::swap`,
-        typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-        arguments: [
-          ptb.object(globalConfigId),
-          ptb.object(pool.id),
-          coinA,  // Use actual coinA from close_position instead of zero coin
-          coinB,
-          ptb.pure.bool(false), // a2b: false = B to A
-          ptb.pure.bool(true), // by_amount_in
-          ptb.pure.u64(U64_MAX),
-          ptb.pure.u128(MAX_SQRT_PRICE),
-          ptb.pure.bool(false), // use_coin_value
-          ptb.object(SUI_CLOCK_OBJECT_ID),
-        ],
-      });
-      
-      // Extract results safely without direct indexing
-      const swappedCoinA = safeUseNestedResult(swapResult, 0, 'swapped coinA from router::swap');
-      const remainderCoinB = safeUseNestedResult(swapResult, 1, 'remainder coinB from router::swap');
-      
-      // Swap was performed: reference the NestedResult output and merge
-      // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
-      logger.debug('  Merging swap output (swappedCoinA) into coinA');
-      safeMergeCoins(ptb, coinA, swappedCoinA, { description: 'swap output into coinA' });
-      logger.debug('  Merging swap remainder (remainderCoinB) into coinB');
-      safeMergeCoins(ptb, coinB, remainderCoinB, { description: 'swap remainder into coinB' });
-      logger.info('  ✓ Swapped: coinB to coinA, output and remainder merged into stable coins');
-      
-      return { coinA, coinB };
-      
-    } else if (sqrtPriceCurrent > sqrtPriceUpper) {
-      // Price above range - need token B, swap A to B
-      logger.info('  Price above new range - need to swap coinA to coinB');
-      
-      // CHECK: Only perform swap if we have liquidity (and thus coins to swap)
-      if (!positionHasLiquidity) {
-        logger.warn('  ⚠ Skipping swap: position has no liquidity, coins likely have zero balance');
-        logger.info('  Using coins as-is (no swap performed)');
-        return { coinA, coinB };
-      }
-      
-      // Use actual coins from close_position directly (modern Sui SDK pattern)
-      // No need to create zero coins - swap will use and return the actual coins
-      // Use SDK builder pattern: router::swap
-      // Returns tuple (Coin<A>, Coin<B>) - extract safely without direct indexing
-      const swapResult = ptb.moveCall({
-        target: `${packageId}::router::swap`,
-        typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-        arguments: [
-          ptb.object(globalConfigId),
-          ptb.object(pool.id),
-          coinA,
-          coinB,  // Use actual coinB from close_position instead of zero coin
-          ptb.pure.bool(true), // a2b: true = A to B
-          ptb.pure.bool(true), // by_amount_in
-          ptb.pure.u64(U64_MAX),
-          ptb.pure.u128(MIN_SQRT_PRICE),
-          ptb.pure.bool(false), // use_coin_value
-          ptb.object(SUI_CLOCK_OBJECT_ID),
-        ],
-      });
-      
-      // Extract results safely without direct indexing
-      const remainderCoinA = safeUseNestedResult(swapResult, 0, 'remainder coinA from router::swap');
-      const swappedCoinB = safeUseNestedResult(swapResult, 1, 'swapped coinB from router::swap');
-      
-      // Swap was performed: reference the NestedResult output and merge
-      // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
-      logger.debug('  Merging swap output (swappedCoinB) into coinB');
-      safeMergeCoins(ptb, coinB, swappedCoinB, { description: 'swap output into coinB' });
-      logger.debug('  Merging swap remainder (remainderCoinA) into coinA');
-      safeMergeCoins(ptb, coinA, remainderCoinA, { description: 'swap remainder into coinA' });
-      logger.info('  ✓ Swapped: coinA to coinB, output and remainder merged into stable coins');
-      
-      return { coinA, coinB };
-      
-    } else {
-      // Price in range - use both tokens as-is
-      logger.info('  Price in new range - using both coins as-is (no swap needed)');
-      return { coinA, coinB };
+    // Execute the transaction and wait for confirmation
+    const result = await this.suiClient.executeSDKPayload(tx);
+    
+    // Extract position ID (NFT) from transaction response
+    // The position NFT is created as a new object
+    const positionId = this.extractPositionIdFromResponse(result);
+    
+    if (!positionId) {
+      throw new Error('Failed to extract position ID from transaction response');
     }
+    
+    logger.info('✅ Position opened successfully');
+    logger.info(`  Position ID: ${positionId}`);
+    
+    return { positionId, digest: result.digest };
+  }
+  
+  /**
+   * Extract position ID from transaction response
+   * Looks for newly created position NFT object
+   */
+  private extractPositionIdFromResponse(
+    response: any
+  ): string | null {
+    try {
+      // Check objectChanges for created objects
+      const objectChanges = response.objectChanges || [];
+      
+      // Find the created position NFT
+      // Position NFTs are created with type containing "Position" or "position"
+      for (const change of objectChanges) {
+        if (change.type === 'created') {
+          const objectType = change.objectType || '';
+          
+          // Check if this is a position NFT
+          // Cetus position NFTs typically have type like: "0x...::position::Position"
+          if (objectType.toLowerCase().includes('position')) {
+            return change.objectId;
+          }
+        }
+      }
+      
+      // Fallback: check effects.created
+      const created = response.effects?.created || [];
+      if (created.length > 0) {
+        // Return the first created object (likely the position NFT)
+        const firstCreated = created[0];
+        return firstCreated.reference?.objectId || firstCreated.objectId || null;
+      }
+      
+      return null;
+    } catch (error) {
+      logger.error('Error extracting position ID from response', error);
+      return null;
+    }
+  }
+  
+  /**
+   * Add liquidity to a position
+   * Uses wallet coin balances and respects available amounts
+   * 
+   * @param positionId The position NFT ID
+   * @param pool The pool information
+   * @param tickLower Lower tick of the position range
+   * @param tickUpper Upper tick of the position range
+   * @param amountA Amount of token A to add
+   * @param amountB Amount of token B to add
+   * @param slippagePercent Slippage tolerance percentage
+   * @returns Object with transaction digest
+   */
+  private async addLiquidity(
+    positionId: string,
+    pool: Pool,
+    tickLower: number,
+    tickUpper: number,
+    amountA: bigint,
+    amountB: bigint,
+    slippagePercent: number
+  ): Promise<{ digest?: string }> {
+    const sdk = this.cetusService.getSDK();
+    
+    logger.info('Adding liquidity to position...');
+    logger.info(`  Position ID: ${positionId}`);
+    logger.info(`  Amount A: ${amountA.toString()}`);
+    logger.info(`  Amount B: ${amountB.toString()}`);
+    logger.info(`  Slippage: ${slippagePercent}%`);
+    
+    // Build the add liquidity transaction using Cetus SDK
+    // The SDK requires delta_liquidity and max amounts (not fixed amounts)
+    // For now, we'll use the amounts as max values and let SDK calculate liquidity
+    const tx = await sdk.Position.createAddLiquidityPayload({
+      coinTypeA: pool.coinTypeA,
+      coinTypeB: pool.coinTypeB,
+      pool_id: pool.id,
+      pos_id: positionId,
+      delta_liquidity: '0', // SDK will calculate based on max amounts
+      max_amount_a: amountA.toString(),
+      max_amount_b: amountB.toString(),
+      tick_lower: tickLower,
+      tick_upper: tickUpper,
+      collect_fee: false, // Don't collect fees when adding to newly opened position
+      rewarder_coin_types: [],  // No rewarders for now
+    });
+    
+    // Execute the transaction and wait for confirmation
+    const result = await this.suiClient.executeSDKPayload(tx);
+    
+    logger.info('✅ Liquidity added successfully');
+    return { digest: result.digest };
   }
 }

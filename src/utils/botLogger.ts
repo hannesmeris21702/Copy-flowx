@@ -238,6 +238,76 @@ export class BotLogger {
   }
 
   /**
+   * Log out-of-range detection
+   */
+  static logOutOfRangeDetection(params: {
+    currentTick: number;
+    tickLower: number;
+    tickUpper: number;
+    positionId: string;
+    liquidity: string;
+  }): void {
+    const currentStep = context.getStep();
+    const prefix = currentStep ? `[${currentStep}] ` : '';
+    
+    logger.info(`${prefix}⚠️  OUT_OF_RANGE_DETECTED`);
+    logger.info(`${prefix}  Position: ${params.positionId}`);
+    logger.info(`${prefix}  Current Tick: ${params.currentTick}`);
+    logger.info(`${prefix}  Range: [${params.tickLower}, ${params.tickUpper}]`);
+    logger.info(`${prefix}  Liquidity: ${params.liquidity}`);
+    logger.info(`${prefix}  Status: ${params.currentTick < params.tickLower ? 'BELOW RANGE' : 'ABOVE RANGE'}`);
+  }
+
+  /**
+   * Log position closure
+   */
+  static logPositionClosed(params: {
+    positionId: string;
+    poolId: string;
+    success: boolean;
+    transactionDigest?: string;
+  }): void {
+    const currentStep = context.getStep();
+    const prefix = currentStep ? `[${currentStep}] ` : '';
+    const status = params.success ? '✅' : '❌';
+    
+    logger.info(`${prefix}${status} POSITION_CLOSED`);
+    logger.info(`${prefix}  Position: ${params.positionId}`);
+    logger.info(`${prefix}  Pool: ${params.poolId}`);
+    if (params.transactionDigest) {
+      logger.info(`${prefix}  Transaction: ${params.transactionDigest}`);
+    }
+    logger.info(`${prefix}  Liquidity: 100% removed`);
+    logger.info(`${prefix}  Fees: Collected`);
+    logger.info(`${prefix}  NFT: Closed`);
+  }
+
+  /**
+   * Log wallet balances
+   */
+  static logWalletBalances(params: {
+    tokenA: {
+      type: string;
+      balance: string;
+    };
+    tokenB: {
+      type: string;
+      balance: string;
+    };
+    context?: string;
+  }): void {
+    const currentStep = context.getStep();
+    const prefix = currentStep ? `[${currentStep}] ` : '';
+    const contextLabel = params.context ? ` (${params.context})` : '';
+    
+    logger.info(`${prefix}💰 WALLET_BALANCES${contextLabel}`);
+    logger.info(`${prefix}  Token A: ${params.tokenA.balance}`);
+    logger.info(`${prefix}    Type: ${params.tokenA.type}`);
+    logger.info(`${prefix}  Token B: ${params.tokenB.balance}`);
+    logger.info(`${prefix}    Type: ${params.tokenB.type}`);
+  }
+
+  /**
    * Log swap operation details
    */
   static logSwap(params: {
@@ -245,23 +315,35 @@ export class BotLogger {
     reason?: string;
     inputAmount?: string;
     outputAmount?: string;
+    price?: string;
+    slippage?: string;
+    transactionDigest?: string;
   }): void {
     const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
     
     if (params.direction === SwapDirection.NONE) {
-      logger.info(`${prefix}⊘ Swap: Not needed${params.reason ? ` - ${params.reason}` : ''}`);
+      logger.info(`${prefix}⊘ SWAP_NOT_REQUIRED${params.reason ? ` - ${params.reason}` : ''}`);
     } else {
       const arrow = params.direction === SwapDirection.A_TO_B ? '→' : '←';
-      logger.info(`${prefix}🔄 Swap: ${params.direction.replace('_', ' ')} ${arrow}`);
+      logger.info(`${prefix}🔄 SWAP_EXECUTED: ${params.direction.replace('_', ' ')} ${arrow}`);
       if (params.reason) {
         logger.info(`${prefix}  Reason: ${params.reason}`);
       }
       if (params.inputAmount) {
-        logger.info(`${prefix}  Input: ${params.inputAmount}`);
+        logger.info(`${prefix}  Input Amount: ${params.inputAmount}`);
       }
       if (params.outputAmount) {
-        logger.info(`${prefix}  Output: ${params.outputAmount}`);
+        logger.info(`${prefix}  Output Amount: ${params.outputAmount}`);
+      }
+      if (params.price) {
+        logger.info(`${prefix}  Price: ${params.price}`);
+      }
+      if (params.slippage) {
+        logger.info(`${prefix}  Slippage: ${params.slippage}%`);
+      }
+      if (params.transactionDigest) {
+        logger.info(`${prefix}  Transaction: ${params.transactionDigest}`);
       }
     }
   }
@@ -271,17 +353,25 @@ export class BotLogger {
    */
   static logOpenPosition(params: {
     poolId: string;
+    positionId?: string;
     tickLower: number;
     tickUpper: number;
     success: boolean;
+    transactionDigest?: string;
   }): void {
     const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
-    const status = params.success ? '✓' : '✗';
+    const status = params.success ? '✅' : '❌';
     
-    logger.info(`${prefix}${status} Open Position:`);
+    logger.info(`${prefix}${status} POSITION_OPENED`);
+    if (params.positionId) {
+      logger.info(`${prefix}  Position ID: ${params.positionId}`);
+    }
     logger.info(`${prefix}  Pool: ${params.poolId}`);
     logger.info(`${prefix}  Range: [${params.tickLower}, ${params.tickUpper}]`);
+    if (params.transactionDigest) {
+      logger.info(`${prefix}  Transaction: ${params.transactionDigest}`);
+    }
   }
 
   /**
@@ -292,15 +382,19 @@ export class BotLogger {
     amountA: string;
     amountB: string;
     success: boolean;
+    transactionDigest?: string;
   }): void {
     const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
-    const status = params.success ? '✓' : '✗';
+    const status = params.success ? '✅' : '❌';
     
-    logger.info(`${prefix}${status} Add Liquidity:`);
+    logger.info(`${prefix}${status} LIQUIDITY_ADDED`);
     logger.info(`${prefix}  Position: ${params.positionId}`);
     logger.info(`${prefix}  Amount A: ${params.amountA}`);
     logger.info(`${prefix}  Amount B: ${params.amountB}`);
+    if (params.transactionDigest) {
+      logger.info(`${prefix}  Transaction: ${params.transactionDigest}`);
+    }
   }
 
   /**
@@ -323,6 +417,9 @@ export const stepDebug = BotLogger.stepDebug.bind(BotLogger);
 export const logPTBCommand = BotLogger.logPTBCommand.bind(BotLogger);
 export const logPTBCommands = BotLogger.logPTBCommands.bind(BotLogger);
 export const logPTBValidation = BotLogger.logPTBValidation.bind(BotLogger);
+export const logOutOfRangeDetection = BotLogger.logOutOfRangeDetection.bind(BotLogger);
+export const logPositionClosed = BotLogger.logPositionClosed.bind(BotLogger);
+export const logWalletBalances = BotLogger.logWalletBalances.bind(BotLogger);
 export const logSwap = BotLogger.logSwap.bind(BotLogger);
 export const logOpenPosition = BotLogger.logOpenPosition.bind(BotLogger);
 export const logAddLiquidity = BotLogger.logAddLiquidity.bind(BotLogger);
