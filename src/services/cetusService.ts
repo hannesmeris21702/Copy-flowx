@@ -107,16 +107,22 @@ export class CetusService {
     return String(coinType);
   }
   
-  async getPosition(): Promise<Position> {
+  async getPosition(): Promise<Position | null> {
+    // If no initial position ID is configured, return null
+    if (!this.config.initialPositionId) {
+      logger.debug('No initial position ID configured, skipping position fetch');
+      return null;
+    }
+    
     try {
       return await withRetry(
         async () => {
           const positionData = await this.sdk.Position.getPositionById(
-            this.config.positionId
+            this.config.initialPositionId!
           );
           
           if (!positionData) {
-            throw new Error(`Position ${this.config.positionId} not found`);
+            throw new Error(`Position ${this.config.initialPositionId} not found`);
           }
           
           return {

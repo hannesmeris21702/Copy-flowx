@@ -73,6 +73,12 @@ export class RebalancingBot {
       // Generate report
       const report = await this.monitorService.generateReport();
       
+      // If no position exists, the bot cannot rebalance
+      if (!report.position) {
+        logger.info(`No position to rebalance: ${report.reason}`);
+        return;
+      }
+      
       // Check if rebalancing is needed (based on OUT_OF_RANGE status)
       if (!report.shouldRebalance) {
         logger.info(`No rebalancing needed: ${report.reason}`);

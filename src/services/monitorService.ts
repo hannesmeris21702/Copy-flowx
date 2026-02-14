@@ -10,7 +10,7 @@ import {
 export interface MonitorReport {
   timestamp: number;
   pool: Pool;
-  position: Position;
+  position: Position | null;
   currentTick: number;
   isInRange: boolean;
   priceDeviation: number;
@@ -36,6 +36,30 @@ export class MonitorService {
       this.cetusService.getPool(),
       this.cetusService.getPosition(),
     ]);
+    
+    // If no position exists, report that no position is being monitored
+    if (!position) {
+      const suggestedNewRange = calculateTickRange(
+        pool.currentTick,
+        this.config.rangeWidthPercent,
+        pool.tickSpacing
+      );
+      
+      const report: MonitorReport = {
+        timestamp: Date.now(),
+        pool,
+        position: null,
+        currentTick: pool.currentTick,
+        isInRange: true, // Set to true since no position means no need to rebalance
+        priceDeviation: 0,
+        suggestedNewRange,
+        shouldRebalance: false,
+        reason: 'No position configured - bot will create positions dynamically',
+      };
+      
+      this.logReport(report);
+      return report;
+    }
     
     const inRange = isTickInRange(
       pool.currentTick,
@@ -85,6 +109,16 @@ export class MonitorService {
   private logReport(report: MonitorReport): void {
     logger.info('=== Position Monitor Report ===');
     logger.info(`Pool: ${report.pool.id}`);
+    
+    if (!report.position) {
+      logger.info('Position: None (will be created dynamically)');
+      logger.info(`Current Tick: ${report.currentTick}`);
+      logger.info(`Suggested New Range: [${report.suggestedNewRange.tickLower}, ${report.suggestedNewRange.tickUpper}]`);
+      logger.info(`Status: ${report.reason}`);
+      logger.info('===============================');
+      return;
+    }
+    
     logger.info(`Position: ${report.position.id}`);
     logger.info(`Current Tick: ${report.currentTick}`);
     logger.info(`Position Range: [${report.position.tickLower}, ${report.position.tickUpper}]`);
