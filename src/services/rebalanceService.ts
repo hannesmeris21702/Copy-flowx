@@ -574,7 +574,7 @@ export class RebalanceService {
     logger.info(`  Amount B: ${amountB.toString()}`);
     logger.info(`  Slippage: ${slippagePercent}%`);
     
-    // Convert slippage percentage to basis points (1% = 100 bps)
+    // Convert slippage from percentage (e.g., 1.0 for 1%) to basis points (100 bps)
     const slippageBps = Math.floor(slippagePercent * 100);
     
     // Build the add liquidity transaction using Cetus SDK
@@ -587,7 +587,7 @@ export class RebalanceService {
       amount_b: amountB.toString(),
       fix_amount_a: true,  // Fix amount A, allow B to adjust within slippage
       slippage_tolerance_bps: slippageBps,
-      is_open: true,  // Position was just opened
+      is_open: true,  // true for newly opened positions, false for existing positions
       rewarder_coin_types: [],  // No rewarders for now
     });
     

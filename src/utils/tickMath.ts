@@ -492,7 +492,10 @@ export function calculateLiquidityAmounts(
     };
   }
   
-  // Should not reach here, but as fallback use all available of both
+  // This should not be reached under normal circumstances
+  // If we get here, it means the ratio calculations above had rounding issues
+  // As a safe fallback, use all available tokens
+  // This may result in slightly more dust than optimal
   return {
     amountA: availableA,
     amountB: availableB,
