@@ -2,6 +2,15 @@ import { Transaction, TransactionObjectArgument } from '@mysten/sui/transactions
 import { logger } from './logger';
 
 /**
+ * Type representing a PTB result that can be accessed by index.
+ * This includes MoveCall results which may have indexed properties.
+ */
+type IndexableResult = {
+  [key: number]: TransactionObjectArgument | undefined;
+  [key: string]: unknown;
+};
+
+/**
  * Safe PTB Helper Error - Thrown when PTB operations cannot be safely performed
  * Provides clear error messages with context about what went wrong
  */
@@ -112,6 +121,7 @@ export function safeMergeCoins(
   logger.debug(`✓ Merged coin for ${description}`);
 }
 
+
 /**
  * Safely transfers objects without directly indexing result arrays.
  * Validates that objects exist before attempting to transfer.
@@ -151,7 +161,7 @@ export function safeMergeCoins(
  */
 export function safeTransferObjects(
   ptb: Transaction,
-  objects: TransactionObjectArgument | TransactionObjectArgument[] | undefined | null | any,
+  objects: TransactionObjectArgument | TransactionObjectArgument[] | unknown,
   recipient: TransactionObjectArgument,
   options?: {
     required?: boolean;
@@ -213,7 +223,7 @@ export function safeTransferObjects(
   // This handles the case where result might have a [0] property
   if (typeof objects === 'object' && objects !== null) {
     // Try to access index 0 safely
-    const firstObject = (objects as any)[0];
+    const firstObject = (objects as IndexableResult)[0];
     if (firstObject !== undefined) {
       // Has a [0] property, transfer it
       ptb.transferObjects([firstObject], recipient);
@@ -222,8 +232,8 @@ export function safeTransferObjects(
     }
   }
 
-  // Single object - transfer directly
-  ptb.transferObjects([objects], recipient);
+  // Single object - transfer directly (assume it's a valid TransactionObjectArgument)
+  ptb.transferObjects([objects as TransactionObjectArgument], recipient);
   logger.debug(`✓ Transferred object for ${description}`);
 }
 
@@ -236,7 +246,7 @@ export function safeTransferObjects(
  * - Check existence before use
  * - Throw descriptive error if missing
  * 
- * @param result - The result from a MoveCall (can be single value or array)
+ * @param result - The result from a MoveCall (can be single value, array, or indexable result)
  * @param index - The index to extract (typically 0 for first result)
  * @param description - Description of what's being extracted for error messages
  * @returns The extracted value at the specified index
@@ -263,7 +273,7 @@ export function safeTransferObjects(
  * ```
  */
 export function safeUseNestedResult<T = TransactionObjectArgument>(
-  result: T | T[] | undefined | null | any,
+  result: T | T[] | unknown,
   index: number,
   description: string
 ): T {
@@ -321,7 +331,7 @@ export function safeUseNestedResult<T = TransactionObjectArgument>(
   // Handle object-like result with indexed access
   if (typeof result === 'object') {
     // Try to access the index
-    const element = (result as any)[index];
+    const element = (result as IndexableResult)[index];
     if (element === undefined) {
       // If index is 0 and no [0] property, maybe the result itself is the value
       if (index === 0) {
@@ -373,7 +383,7 @@ export function safeUseNestedResult<T = TransactionObjectArgument>(
  * ```
  */
 export function safeUseNestedResultOptional<T = TransactionObjectArgument>(
-  result: T | T[] | undefined | null | any,
+  result: T | T[] | unknown,
   index: number,
   description: string
 ): T | undefined {
