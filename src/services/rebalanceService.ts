@@ -21,6 +21,9 @@ import {
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
 BigInt.prototype.toJSON = function() { return this.toString(); };
 
+// Value-based swap tolerance percentage (1% as per requirements)
+const SWAP_VALUE_TOLERANCE_PERCENT = 1;
+
 export class RebalanceService {
   private suiClient: SuiClientService;
   private cetusService: CetusService;
@@ -244,7 +247,7 @@ export class RebalanceService {
         sqrtPrice,
         newRange.tickLower,
         newRange.tickUpper,
-        1 // Use 1% tolerance as per requirements
+        SWAP_VALUE_TOLERANCE_PERCENT
       );
       
       logger.info('=== Swap Requirement Analysis (Value-Based) ===');
@@ -255,7 +258,7 @@ export class RebalanceService {
       logger.info(`Optimal Ratio (A/B): ${swapCheck.optimalRatio === Infinity ? 'Infinity (only A needed)' : swapCheck.optimalRatio.toFixed(6)}`);
       logger.info(`Available Ratio (A/B): ${swapCheck.availableRatio === Infinity ? 'Infinity (only A available)' : swapCheck.availableRatio.toFixed(6)}`);
       logger.info(`Value Mismatch: ${swapCheck.ratioMismatchPercent.toFixed(2)}%`);
-      logger.info(`Tolerance: 1%`);
+      logger.info(`Tolerance: ${SWAP_VALUE_TOLERANCE_PERCENT}%`);
       logger.info(`Swap Required: ${swapCheck.swapRequired ? 'YES' : 'NO'}`);
       logger.info(`Reason: ${swapCheck.reason}`);
       logger.info('================================================');

@@ -434,13 +434,16 @@ export function calculateSwapAmount(
   }
   
   // Both tokens required - calculate value difference
+  // All values are calculated in terms of token B (quote token)
   const valueDiffA = availableValueA - requiredValueA;
   const valueDiffB = availableValueB - requiredValueB;
   
   // Determine swap direction based on which token we have excess of
   if (valueDiffA > 0) {
     // We have excess value in token A, need to swap A → B
-    // Calculate how much A to swap to match required distribution
+    // valueDiffA is the excess value in terms of token B
+    // currentPrice is tokenB per tokenA, so to get token A amount:
+    // amountA = value_in_B / price_in_B_per_A
     const swapValueNeeded = valueDiffA;
     const swapAmountA = BigInt(Math.floor(swapValueNeeded / currentPrice));
     
@@ -455,7 +458,7 @@ export function calculateSwapAmount(
     };
   } else if (valueDiffB > 0) {
     // We have excess value in token B, need to swap B → A
-    // Calculate how much B to swap to match required distribution
+    // valueDiffB is already the amount in terms of token B (no conversion needed)
     const swapValueNeeded = valueDiffB;
     const swapAmountB = BigInt(Math.floor(swapValueNeeded));
     
