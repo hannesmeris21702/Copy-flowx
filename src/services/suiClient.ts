@@ -198,4 +198,49 @@ export class SuiClientService {
       throw error;
     }
   }
+
+  /**
+   * Get all position NFT object IDs owned by the wallet
+   * Position NFTs have type containing "::position::Position"
+   * @returns Array of position object IDs
+   */
+  async getWalletPositions(): Promise<string[]> {
+    try {
+      return await withRetry(
+        async () => {
+          const address = this.getAddress();
+          const result = await this.client.getOwnedObjects({
+            owner: address,
+            options: {
+              showType: true,
+              showContent: false,
+            },
+          });
+          
+          // Filter objects that are position NFTs
+          // Position NFTs have type containing "::position::Position" (case-sensitive)
+          const positionIds: string[] = [];
+          for (const obj of result.data) {
+            if (!obj.data) continue;
+            
+            const objectType = obj.data.type || '';
+            // Use case-sensitive matching for exact type match
+            if (objectType.includes('::position::Position')) {
+              positionIds.push(obj.data.objectId);
+            }
+          }
+          
+          logger.debug(`Found ${positionIds.length} position NFTs in wallet`);
+          return positionIds;
+        },
+        this.config.maxRetries,
+        this.config.minRetryDelayMs,
+        this.config.maxRetryDelayMs,
+        'Get wallet positions'
+      );
+    } catch (error) {
+      logger.error('Failed to get wallet positions', error);
+      throw error;
+    }
+  }
 }
