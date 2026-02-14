@@ -4,6 +4,7 @@ import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
 import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
+import { logPTBValidation } from '../utils/botLogger';
 import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
 import { PTBValidator } from '../utils/ptbValidator';
 import { safeMergeCoins, safeTransferObjects, safeUseNestedResult, safeUseNestedResultOptional } from '../utils/ptbHelpers';
@@ -420,16 +421,7 @@ export class RebalanceService {
     // Log 'Command ${i}: ${txb.getEffects()}' as requested in problem statement
     // Note: getEffects() is not available pre-build, so we log command structure
     const ptbData = ptb.getData();
-    console.log('=== PTB COMMANDS PRE-BUILD VALIDATION ===');
-    console.log(`Total commands: ${ptbData.commands.length}`);
-    ptbData.commands.forEach((cmd: any, idx: number) => {
-      // Log command with index and type info (effects not available until execution)
-      const cmdType = cmd.$kind || cmd.kind || 'unknown';
-      const cmdStr = JSON.stringify(cmd);
-      const truncatedCmd = cmdStr.length > 300 ? cmdStr.substring(0, 300) + '...' : cmdStr;
-      console.log(`Command ${idx}: type=${cmdType}, data=${truncatedCmd}`);
-    });
-    console.log('=== END PTB COMMANDS ===');
+    logPTBValidation(ptbData);
     
     // Validate NestedResult references before building PTB
     // This ensures no NestedResult references a command result index that doesn't exist
