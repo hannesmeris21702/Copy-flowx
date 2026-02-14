@@ -17,9 +17,11 @@ type CoinTypeValue = string | {
 export class CetusService {
   private sdk: CetusClmmSDK;
   private config: BotConfig;
+  private suiClient: SuiClientService;
   
   constructor(suiClient: SuiClientService, config: BotConfig) {
     this.config = config;
+    this.suiClient = suiClient;
     
     this.sdk = initMainnetSDK(config.rpcUrl, suiClient.getAddress());
     this.sdk.senderAddress = suiClient.getAddress();
@@ -108,22 +110,79 @@ export class CetusService {
   }
   
   async getPosition(): Promise<Position | null> {
-    // If no initial position ID is configured, return null
-    if (!this.config.initialPositionId) {
-      logger.debug('No initial position ID configured, skipping position fetch');
-      return null;
+    // If initial position ID is configured, use it
+    if (this.config.initialPositionId) {
+      try {
+        return await withRetry(
+          async () => {
+            const positionData = await this.sdk.Position.getPositionById(
+              this.config.initialPositionId!
+            );
+            
+            if (!positionData) {
+              throw new Error(`Position ${this.config.initialPositionId} not found`);
+            }
+            
+            return {
+              id: positionData.pos_object_id,
+              poolId: positionData.pool,
+              tickLower: positionData.tick_lower_index,
+              tickUpper: positionData.tick_upper_index,
+              liquidity: positionData.liquidity,
+              coinA: positionData.coin_type_a,
+              coinB: positionData.coin_type_b,
+            };
+          },
+          this.config.maxRetries,
+          this.config.minRetryDelayMs,
+          this.config.maxRetryDelayMs,
+          'Get position'
+        );
+      } catch (error) {
+        logger.error('Failed to get position', error);
+        throw error;
+      }
     }
     
+    // If no initial position ID is configured, scan wallet positions for the pool
+    logger.info('No POSITION_ID configured, scanning wallet positions...');
+    
     try {
-      return await withRetry(
-        async () => {
-          const positionData = await this.sdk.Position.getPositionById(
-            this.config.initialPositionId!
-          );
+      // Get all position NFT IDs from wallet
+      const positionIds = await this.suiClient.getWalletPositions();
+      
+      if (positionIds.length === 0) {
+        logger.info('No positions found in wallet');
+        return null;
+      }
+      
+      logger.info(`Found ${positionIds.length} position(s) in wallet, checking for pool ${this.config.poolId}...`);
+      
+      // Check each position to find one for this pool with liquidity > 0
+      for (const positionId of positionIds) {
+        try {
+          const positionData = await this.sdk.Position.getPositionById(positionId);
           
           if (!positionData) {
-            throw new Error(`Position ${this.config.initialPositionId} not found`);
+            logger.debug(`Position ${positionId} not found, skipping`);
+            continue;
           }
+          
+          // Check if position is for the target pool
+          if (positionData.pool !== this.config.poolId) {
+            logger.debug(`Position ${positionId} is for pool ${positionData.pool}, skipping`);
+            continue;
+          }
+          
+          // Check if position has liquidity
+          const liquidityBigInt = BigInt(positionData.liquidity);
+          if (liquidityBigInt <= 0n) {
+            logger.debug(`Position ${positionId} has no liquidity, skipping`);
+            continue;
+          }
+          
+          // Found a valid position!
+          logger.info(`✅ Found position ${positionId} for pool with liquidity ${positionData.liquidity}`);
           
           return {
             id: positionData.pos_object_id,
@@ -134,14 +193,16 @@ export class CetusService {
             coinA: positionData.coin_type_a,
             coinB: positionData.coin_type_b,
           };
-        },
-        this.config.maxRetries,
-        this.config.minRetryDelayMs,
-        this.config.maxRetryDelayMs,
-        'Get position'
-      );
+        } catch (error) {
+          logger.warn(`Error checking position ${positionId}:`, error);
+          continue;
+        }
+      }
+      
+      logger.info('No positions found for this pool with liquidity > 0');
+      return null;
     } catch (error) {
-      logger.error('Failed to get position', error);
+      logger.error('Failed to scan wallet positions', error);
       throw error;
     }
   }
