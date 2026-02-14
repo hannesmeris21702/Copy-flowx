@@ -223,19 +223,19 @@ export function extractMoveCallTarget(ptb: Transaction, commandIndex: number): s
       return 'unknown';
     }
     
-    // Check for MoveCall command
-    const isMoveCall = cmd.$kind === 'MoveCall';
-    if (!isMoveCall) {
-      return 'unknown (not a MoveCall)';
-    }
-    
-    // Extract target from MoveCall structure
-    if (cmd.MoveCall) {
+    // Check for MoveCall command and extract target
+    if (cmd.$kind === 'MoveCall' && cmd.MoveCall) {
       const { package: pkg, module, function: func } = cmd.MoveCall;
+      
+      // Validate all components are present
+      if (!pkg || !module || !func) {
+        return 'unknown (incomplete MoveCall structure)';
+      }
+      
       return `${pkg}::${module}::${func}`;
     }
     
-    return 'unknown';
+    return 'unknown (not a MoveCall)';
   } catch (error) {
     logger.warn(`Failed to extract MoveCall target for command ${commandIndex}: ${(error as Error).message}`);
     return 'unknown';
