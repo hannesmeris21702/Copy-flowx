@@ -536,7 +536,7 @@ export class RebalanceService {
    */
   private safeTransfer(
     ptb: Transaction,
-    moveCallResult: any,
+    moveCallResult: TransactionObjectArgument | TransactionObjectArgument[] | any,
     recipient: TransactionObjectArgument
   ): void {
     // Check if moveCallResult exists and has at least one element
