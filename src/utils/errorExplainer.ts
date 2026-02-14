@@ -70,7 +70,7 @@ const ERROR_MAP: Record<string, ErrorExplanation> = {
   },
 
   InsufficientGas: {
-    name: 'InsufficientGas / IntentBudgetError',
+    name: 'InsufficientGas',
     description: 'Transaction gas budget is insufficient to execute the transaction',
     causes: [
       'Gas budget set too low for complex transaction',
@@ -122,7 +122,7 @@ const ERROR_MAP: Record<string, ErrorExplanation> = {
   },
 
   TypeArgumentMismatch: {
-    name: 'TypeArgumentMismatch / Type Error',
+    name: 'TypeArgumentMismatch',
     description: 'Type arguments don\'t match expected types or are malformed',
     causes: [
       'Coin types don\'t match pool configuration',
@@ -283,8 +283,10 @@ function extractErrorName(error: Error | string): string {
     }
   }
   
-  // Check for common variations
-  if (errorStr.toLowerCase().includes('gas') || errorStr.includes('InsufficientGas')) {
+  // Check for common variations and aliases
+  if (errorStr.toLowerCase().includes('gas') || 
+      errorStr.includes('budget') || 
+      errorStr.includes('IntentBudgetError')) {
     return 'InsufficientGas';
   }
   
