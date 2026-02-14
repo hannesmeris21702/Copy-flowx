@@ -391,6 +391,7 @@ export class RebalanceService {
     const tickUpperU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickUpper)));
     
     // FIXED: open_position returns a SINGLE Position NFT object (not a tuple)
+    // Per Cetus pool_script Move contract: public entry fun open_position(...) returns Position NFT
     // Do NOT use array destructuring or access [0] - it causes SecondaryIndexOutOfBounds error
     // The moveCall result itself IS the Position NFT
     const newPosition = ptb.moveCall({
@@ -440,7 +441,8 @@ export class RebalanceService {
     logger.info('  ✓ Both coins validated: finalCoinA and finalCoinB ready');
     
     // Step 6: Add liquidity to new position
-    // open_position always returns a valid position NFT, so we can proceed directly
+    // NOTE: Under normal operation, open_position returns a valid position NFT
+    // If open_position fails, the entire PTB transaction will revert atomically
     // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
     logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
     
