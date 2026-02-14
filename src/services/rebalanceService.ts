@@ -401,6 +401,10 @@ export class RebalanceService {
         if (!newPositionId) {
           throw new Error('State indicates position opened but newPositionId not found in state data');
         }
+        
+        // Set currentPositionId when resuming from state
+        this.currentPositionId = newPositionId;
+        logger.info(`Using runtime position ID from saved state: ${this.currentPositionId}`);
       } else {
         currentStage = 'open_position';
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
@@ -679,13 +683,34 @@ export class RebalanceService {
       logger.info(`Value Difference: ${valueDifferencePercent.toFixed(2)}%`);
       logger.info('=======================================');
       
+      // Validate that currentPositionId is set before adding liquidity
+      if (!this.currentPositionId) {
+        logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        logger.error('❌ CRITICAL ERROR: Position ID not available');
+        logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        logger.error('Cannot add liquidity without a valid position ID.');
+        logger.error('this.currentPositionId is undefined.');
+        logger.error('This should never happen - position must be opened before adding liquidity.');
+        logger.error('');
+        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+        logger.error('Position may remain open without liquidity.');
+        logger.error('Manual intervention required.');
+        logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        
+        // Clear state to return to monitoring
+        this.stateManager.clearState();
+        
+        return;
+      }
+      
       logger.info('Adding liquidity to position...');
+      logger.info(`  Position ID: ${this.currentPositionId}`);
       logger.info(`  Using Token A: ${finalAmountA.toString()}`);
       logger.info(`  Using Token B: ${finalAmountB.toString()}`);
       
-      // Add liquidity to the position
+      // Add liquidity to the position using this.currentPositionId
       const liquidityResult = await this.addLiquidity(
-        newPositionId,
+        this.currentPositionId,
         pool,
         newRange.tickLower,
         newRange.tickUpper,
