@@ -4,7 +4,7 @@ import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
-import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount } from '../utils/tickMath';
+import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount, calculateLiquidityAmounts } from '../utils/tickMath';
 
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
@@ -75,8 +75,8 @@ export class RebalanceService {
       setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
       logger.info('Querying wallet balances...');
       
-      const availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
-      const availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+      let availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+      let availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
       
       logger.info('=== Wallet Balances (Available Liquidity) ===');
       logger.info(`Token A (${pool.coinTypeA}):`);
@@ -187,17 +187,17 @@ export class RebalanceService {
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
         logger.info('Refreshing wallet balances after swap...');
         
-        const newAvailableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
-        const newAvailableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+        availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+        availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
         
         logger.info('=== Updated Wallet Balances ===');
-        logger.info(`Token A: ${newAvailableA}`);
-        logger.info(`Token B: ${newAvailableB}`);
+        logger.info(`Token A: ${availableA}`);
+        logger.info(`Token B: ${availableB}`);
         
         // Recalculate value after swap
         const { valueA: newValueA, valueB: newValueB, totalValue: newTotalValue } = calculateQuoteValue(
-          newAvailableA,
-          newAvailableB,
+          availableA,
+          availableB,
           sqrtPrice
         );
         
@@ -210,8 +210,8 @@ export class RebalanceService {
         
         addSentryBreadcrumb('Balances refreshed after swap', 'rebalance', {
           positionId: position.id,
-          newAvailableA: newAvailableA.toString(),
-          newAvailableB: newAvailableB.toString(),
+          newAvailableA: availableA.toString(),
+          newAvailableB: availableB.toString(),
           newTotalValue: newTotalValue.toString(),
         });
       } else {
@@ -232,8 +232,6 @@ export class RebalanceService {
       logger.info('=== New Position Created ===');
       logger.info(`Position ID: ${newPositionId}`);
       logger.info(`Tick range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
-      logger.info('Note: Position created WITHOUT liquidity');
-      logger.info('Liquidity can be added in a separate transaction');
       logger.info('============================');
       
       addSentryBreadcrumb('New position opened', 'rebalance', {
@@ -241,6 +239,80 @@ export class RebalanceService {
         newPositionId: newPositionId,
         tickLower: newRange.tickLower,
         tickUpper: newRange.tickUpper,
+      });
+      
+      // Add liquidity to the new position
+      currentStage = 'add_liquidity';
+      setSentryContext({ poolId: pool.id, positionId: newPositionId, stage: currentStage });
+      
+      // Calculate optimal liquidity amounts
+      // This ensures we don't exceed available balances and leave dust if needed
+      // Use the current availableA and availableB (already updated if swap was executed)
+      const liquidityAmounts = calculateLiquidityAmounts(
+        availableA,
+        availableB,
+        sqrtPrice,
+        newRange.tickLower,
+        newRange.tickUpper
+      );
+      
+      logger.info('Adding liquidity to position...');
+      logger.info(`  Using Token A: ${liquidityAmounts.amountA.toString()}`);
+      logger.info(`  Using Token B: ${liquidityAmounts.amountB.toString()}`);
+      
+      // Add liquidity to the position
+      await this.addLiquidity(
+        newPositionId,
+        pool,
+        liquidityAmounts.amountA,
+        liquidityAmounts.amountB,
+        this.config.maxSlippagePercent
+      );
+      
+      // Refresh balances to show what's left (dust)
+      const dustA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+      const dustB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+      
+      logger.info('=== Final Wallet Balances (After Liquidity) ===');
+      logger.info(`Token A (${pool.coinTypeA.substring(0, 20)}...): ${dustA.toString()} (dust remaining)`);
+      logger.info(`Token B (${pool.coinTypeB.substring(0, 20)}...): ${dustB.toString()} (dust remaining)`);
+      logger.info('=================================================');
+      
+      // Calculate final portfolio value to verify preservation
+      const { totalValue: liquidityTotalValue } = calculateQuoteValue(
+        liquidityAmounts.amountA,
+        liquidityAmounts.amountB,
+        sqrtPrice
+      );
+      
+      const { totalValue: dustTotalValue } = calculateQuoteValue(
+        dustA,
+        dustB,
+        sqrtPrice
+      );
+      
+      const finalTotalValue = liquidityTotalValue + dustTotalValue;
+      
+      logger.info('=== Final Portfolio Value ===');
+      logger.info(`Value in Position: ${liquidityTotalValue.toFixed(6)}`);
+      logger.info(`Value in Wallet (dust): ${dustTotalValue.toFixed(6)}`);
+      logger.info(`Total Value: ${finalTotalValue.toFixed(6)}`);
+      logger.info(`Original Total Value: ${totalValue.toFixed(6)}`);
+      
+      // Check if value is preserved (within 1% tolerance to account for slippage and rounding)
+      const valuePreserved = Math.abs(finalTotalValue - totalValue) < 0.01 * totalValue;
+      logger.info(`Value Preserved: ${valuePreserved ? 'YES' : 'NO (within 1% tolerance)'}`);
+      logger.info('==============================');
+      
+      addSentryBreadcrumb('Liquidity added to position', 'rebalance', {
+        positionId: newPositionId,
+        amountA: liquidityAmounts.amountA.toString(),
+        amountB: liquidityAmounts.amountB.toString(),
+        dustA: dustA.toString(),
+        dustB: dustB.toString(),
+        finalTotalValue: finalTotalValue.toString(),
+        originalTotalValue: totalValue.toString(),
+        valuePreserved: valuePreserved,
       });
       
       addSentryBreadcrumb('Wallet balances queried', 'rebalance', {
@@ -267,6 +339,10 @@ export class RebalanceService {
       });
       
       logger.info('=== Rebalance Complete ===');
+      logger.info(`Old Position: ${position.id} (CLOSED)`);
+      logger.info(`New Position: ${newPositionId} (OPENED with liquidity)`);
+      logger.info('===========================');
+
       
     } catch (error) {
       // Use error explainer to provide clear guidance
@@ -471,5 +547,53 @@ export class RebalanceService {
       logger.error('Error extracting position ID from response', error);
       return null;
     }
+  }
+  
+  /**
+   * Add liquidity to a position
+   * Uses wallet coin balances and respects available amounts
+   * 
+   * @param positionId The position NFT ID
+   * @param pool The pool information
+   * @param amountA Amount of token A to add
+   * @param amountB Amount of token B to add
+   * @param slippagePercent Slippage tolerance percentage
+   */
+  private async addLiquidity(
+    positionId: string,
+    pool: Pool,
+    amountA: bigint,
+    amountB: bigint,
+    slippagePercent: number
+  ): Promise<void> {
+    const sdk = this.cetusService.getSDK();
+    
+    logger.info('Adding liquidity to position...');
+    logger.info(`  Position ID: ${positionId}`);
+    logger.info(`  Amount A: ${amountA.toString()}`);
+    logger.info(`  Amount B: ${amountB.toString()}`);
+    logger.info(`  Slippage: ${slippagePercent}%`);
+    
+    // Convert slippage percentage to basis points (1% = 100 bps)
+    const slippageBps = Math.floor(slippagePercent * 100);
+    
+    // Build the add liquidity transaction using Cetus SDK
+    // fix_amount_a=true means we use the specified amount_a and let amount_b adjust
+    const tx = await sdk.Position.addLiquidityTransactionPayload({
+      position_id: positionId,
+      coinTypeA: pool.coinTypeA,
+      coinTypeB: pool.coinTypeB,
+      amount_a: amountA.toString(),
+      amount_b: amountB.toString(),
+      fix_amount_a: true,  // Fix amount A, allow B to adjust within slippage
+      slippage_tolerance_bps: slippageBps,
+      is_open: true,  // Position was just opened
+      rewarder_coin_types: [],  // No rewarders for now
+    });
+    
+    // Execute the transaction and wait for confirmation
+    await this.suiClient.executeSDKPayload(tx);
+    
+    logger.info('✅ Liquidity added successfully');
   }
 }

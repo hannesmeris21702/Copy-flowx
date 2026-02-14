@@ -422,3 +422,79 @@ export function calculateSwapAmount(
     };
   }
 }
+
+/**
+ * Calculate optimal liquidity amounts for a position
+ * Ensures amounts don't exceed available balances
+ * 
+ * @param availableA Available amount of token A in wallet
+ * @param availableB Available amount of token B in wallet
+ * @param currentSqrtPrice Current sqrt price of the pool
+ * @param tickLower Lower tick of the position
+ * @param tickUpper Upper tick of the position
+ * @returns Amounts of A and B to add as liquidity
+ */
+export function calculateLiquidityAmounts(
+  availableA: bigint,
+  availableB: bigint,
+  currentSqrtPrice: bigint,
+  tickLower: number,
+  tickUpper: number
+): { amountA: bigint; amountB: bigint } {
+  const sqrtPriceLower = tickToSqrtPrice(tickLower);
+  const sqrtPriceUpper = tickToSqrtPrice(tickUpper);
+  
+  // Determine current price position relative to the range
+  // If price is below range, only token A is needed
+  if (currentSqrtPrice < sqrtPriceLower) {
+    return {
+      amountA: availableA,
+      amountB: BigInt(0),
+    };
+  }
+  
+  // If price is above range, only token B is needed
+  if (currentSqrtPrice > sqrtPriceUpper) {
+    return {
+      amountA: BigInt(0),
+      amountB: availableB,
+    };
+  }
+  
+  // Price is in range, need both tokens in specific ratio
+  // Calculate the optimal ratio for this range at current price
+  const optimalRatio = calculateOptimalRatio(currentSqrtPrice, tickLower, tickUpper);
+  
+  // Convert to numbers for calculation
+  const availableANum = Number(availableA);
+  const availableBNum = Number(availableB);
+  
+  // Calculate how much we can use based on the optimal ratio
+  // Try to use maximum liquidity possible
+  
+  // Option 1: Use all of token A
+  const neededBForAllA = availableANum / optimalRatio;
+  if (neededBForAllA <= availableBNum) {
+    // We have enough B, use all A
+    return {
+      amountA: availableA,
+      amountB: BigInt(Math.floor(neededBForAllA)),
+    };
+  }
+  
+  // Option 2: Use all of token B
+  const neededAForAllB = availableBNum * optimalRatio;
+  if (neededAForAllB <= availableANum) {
+    // We have enough A, use all B
+    return {
+      amountA: BigInt(Math.floor(neededAForAllB)),
+      amountB: availableB,
+    };
+  }
+  
+  // Should not reach here, but as fallback use all available of both
+  return {
+    amountA: availableA,
+    amountB: availableB,
+  };
+}
