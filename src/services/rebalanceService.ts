@@ -1,6 +1,7 @@
 import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
 import { BotConfig, Pool, Position, RebalanceState } from '../types';
+import { Position as SDKPosition } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
@@ -726,7 +727,7 @@ export class RebalanceService {
       
       // Find the position matching our NFT ID
       const poolPosition = positionsData.data.find(
-        (pos: any) => pos.pos_object_id === positionIdToUse
+        (pos: SDKPosition) => pos.pos_object_id === positionIdToUse
       );
       
       if (!poolPosition) {
@@ -1070,7 +1071,7 @@ export class RebalanceService {
    * @returns Object with transaction digest
    */
   private async addLiquidity(
-    position: any,
+    position: SDKPosition,
     pool: Pool,
     tickLower: number,
     tickUpper: number,
