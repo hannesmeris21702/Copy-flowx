@@ -428,6 +428,24 @@ export class RebalanceService {
     logger.info(`✓ ZERO NestedResult[2] references found (collect_fee is side-effects only)`);
   }
   
+  /**
+   * Safe merge helper function for conditional coin merging.
+   * Only merges if the source coin exists (not undefined or null).
+   * 
+   * @param ptb - The Transaction builder
+   * @param destination - The destination coin to merge into
+   * @param source - The source coin to merge from (may be undefined/null)
+   */
+  private safeMerge(
+    ptb: Transaction,
+    destination: TransactionObjectArgument,
+    source: TransactionObjectArgument | undefined | null
+  ): void {
+    if (source !== undefined && source !== null) {
+      ptb.mergeCoins(destination, [source]);
+    }
+  }
+  
   private addSwapIfNeeded(
     ptb: Transaction,
     pool: Pool,
@@ -490,9 +508,9 @@ export class RebalanceService {
       // Swap was performed: reference the NestedResult output and merge
       // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinA) into coinA');
-      PTBValidator.conditionalMerge(ptb, coinA, [swappedCoinA], 'swap output swappedCoinA');
+      this.safeMerge(ptb, coinA, swappedCoinA);
       logger.debug('  Merging swap remainder (remainderCoinB) into coinB');
-      PTBValidator.conditionalMerge(ptb, coinB, [remainderCoinB], 'swap remainder remainderCoinB');
+      this.safeMerge(ptb, coinB, remainderCoinB);
       logger.info('  ✓ Swapped: coinB to coinA, output and remainder merged into stable coins');
       
       return { coinA, coinB };
@@ -532,9 +550,9 @@ export class RebalanceService {
       // Swap was performed: reference the NestedResult output and merge
       // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinB) into coinB');
-      PTBValidator.conditionalMerge(ptb, coinB, [swappedCoinB], 'swap output swappedCoinB');
+      this.safeMerge(ptb, coinB, swappedCoinB);
       logger.debug('  Merging swap remainder (remainderCoinA) into coinA');
-      PTBValidator.conditionalMerge(ptb, coinA, [remainderCoinA], 'swap remainder remainderCoinA');
+      this.safeMerge(ptb, coinA, remainderCoinA);
       logger.info('  ✓ Swapped: coinA to coinB, output and remainder merged into stable coins');
       
       return { coinA, coinB };
