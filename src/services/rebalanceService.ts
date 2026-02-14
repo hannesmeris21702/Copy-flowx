@@ -4,7 +4,7 @@ import { BotConfig, Pool, Position, RebalanceState } from '../types';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
-import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount, calculateAmountsFromValue, applySafetyBuffers } from '../utils/tickMath';
+import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount, applySafetyBuffers, getAmountsForLiquidity, determinePricePosition, PricePosition } from '../utils/tickMath';
 import { StateManager } from '../utils/stateManager';
 import { 
   logOutOfRangeDetection, 
@@ -474,68 +474,173 @@ export class RebalanceService {
       setSentryContext({ poolId: pool.id, positionId: newPositionId, stage: currentStage });
       
       // =====================================================================
-      // VALUE-BASED LIQUIDITY RE-ADD LOGIC
+      // CLMM ADD LIQUIDITY ENFORCEMENT LOGIC (SDK-based)
       // =====================================================================
       
-      // Step 1: Calculate current available value
-      logger.info('=== Step 1: Calculate Available Value ===');
+      // Step 1: Fetch current pool price and determine price position
+      logger.info('=== Step 1: Determine Price Position ===');
+      const currentPrice = sqrtPriceToPrice(sqrtPrice);
+      const pricePosition = determinePricePosition(sqrtPrice, newRange.tickLower, newRange.tickUpper);
+      logger.info(`Current Pool Price: ${currentPrice.toFixed(6)}`);
+      logger.info(`Price Position: ${pricePosition}`);
+      logger.info('========================================');
+      
+      // Step 2: Calculate target liquidity value
+      logger.info('=== Step 2: Determine Target Liquidity Value ===');
       const { totalValue: availableValue } = calculateQuoteValue(
         availableA,
         availableB,
         sqrtPrice
       );
-      logger.info(`Closed Position Value: ${closedPositionValue.toFixed(6)}`);
-      logger.info(`Available Value (after swap): ${availableValue.toFixed(6)}`);
-      
-      // Step 2: Determine target liquidity value
-      logger.info('=== Step 2: Determine Target Liquidity Value ===');
       const targetLiquidityValue = Math.min(closedPositionValue, availableValue);
+      logger.info(`Closed Position Value: ${closedPositionValue.toFixed(6)}`);
+      logger.info(`Available Value: ${availableValue.toFixed(6)}`);
       logger.info(`Target Liquidity Value: ${targetLiquidityValue.toFixed(6)}`);
       logger.info('=================================================');
       
-      // Step 3: Convert target value to required amounts for the new tick range
-      logger.info('=== Step 3: Convert Value to Token Amounts ===');
-      const { amountA: amountA_needed, amountB: amountB_needed } = calculateAmountsFromValue(
+      // Step 3: Get required amounts using CLMM math
+      logger.info('=== Step 3: Calculate Required Amounts (CLMM Math) ===');
+      const { requiredA, requiredB } = getAmountsForLiquidity(
         targetLiquidityValue,
         sqrtPrice,
         newRange.tickLower,
         newRange.tickUpper
       );
-      logger.info(`Amount A Needed: ${amountA_needed.toString()}`);
-      logger.info(`Amount B Needed: ${amountB_needed.toString()}`);
-      logger.info('===============================================');
+      logger.info(`Required Token A: ${requiredA.toString()}`);
+      logger.info(`Required Token B: ${requiredB.toString()}`);
+      logger.info('========================================================');
       
-      // Step 4: Apply safety buffers
-      logger.info('=== Step 4: Apply Safety Buffers ===');
-      const { usableTokenA, usableTokenB } = applySafetyBuffers(availableA, availableB);
-      logger.info(`Available Token A: ${availableA.toString()}`);
-      logger.info(`Usable Token A (98%): ${usableTokenA.toString()}`);
-      logger.info(`Available Token B: ${availableB.toString()}`);
-      logger.info(`Usable Token B (SUI - reserve): ${usableTokenB.toString()}`);
-      logger.info('=====================================');
+      // Step 4: Handle INSIDE position - may need to swap to get correct ratio
+      let walletA = availableA;
+      let walletB = availableB;
       
-      // Step 5: Calculate final amounts (min of needed vs usable)
-      logger.info('=== Step 5: Determine Final Amounts ===');
-      const finalAmountA = amountA_needed < usableTokenA ? amountA_needed : usableTokenA;
-      const finalAmountB = amountB_needed < usableTokenB ? amountB_needed : usableTokenB;
+      if (pricePosition === PricePosition.INSIDE) {
+        logger.info('=== Step 4: Handle INSIDE Position (Swap if needed) ===');
+        logger.info(`Wallet Token A: ${walletA.toString()}`);
+        logger.info(`Wallet Token B: ${walletB.toString()}`);
+        
+        // Check if we need to swap
+        if (walletA < requiredA) {
+          // Need more A, swap B -> A
+          const shortfallA = requiredA - walletA;
+          const swapAmountB = BigInt(Math.ceil(Number(shortfallA) * currentPrice));
+          
+          logger.info(`⚠️  Insufficient Token A: need ${requiredA.toString()}, have ${walletA.toString()}`);
+          logger.info(`Swapping ${swapAmountB.toString()} of Token B -> A`);
+          
+          // Execute swap B -> A
+          await this.executeSwap(
+            pool,
+            false, // swapFromA = false means B -> A
+            swapAmountB,
+            this.config.maxSlippagePercent
+          );
+          
+          // Re-read wallet balances after swap
+          walletA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+          walletB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+          
+          logger.info(`After swap - Wallet A: ${walletA.toString()}, Wallet B: ${walletB.toString()}`);
+        } else if (walletB < requiredB) {
+          // Need more B, swap A -> B
+          const shortfallB = requiredB - walletB;
+          const swapAmountA = BigInt(Math.ceil(Number(shortfallB) / currentPrice));
+          
+          logger.info(`⚠️  Insufficient Token B: need ${requiredB.toString()}, have ${walletB.toString()}`);
+          logger.info(`Swapping ${swapAmountA.toString()} of Token A -> B`);
+          
+          // Execute swap A -> B
+          await this.executeSwap(
+            pool,
+            true, // swapFromA = true means A -> B
+            swapAmountA,
+            this.config.maxSlippagePercent
+          );
+          
+          // Re-read wallet balances after swap
+          walletA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+          walletB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+          
+          logger.info(`After swap - Wallet A: ${walletA.toString()}, Wallet B: ${walletB.toString()}`);
+        } else {
+          logger.info('✅ Wallet balances sufficient, no swap needed');
+        }
+        logger.info('=========================================================');
+      }
+      
+      // Step 5: Calculate final amounts based on price position
+      logger.info('=== Step 5: Calculate Final Amounts ===');
+      let finalAmountA: bigint;
+      let finalAmountB: bigint;
+      
+      if (pricePosition === PricePosition.INSIDE) {
+        // For INSIDE: use min of wallet and required for both tokens
+        finalAmountA = walletA < requiredA ? walletA : requiredA;
+        finalAmountB = walletB < requiredB ? walletB : requiredB;
+      } else if (pricePosition === PricePosition.BELOW) {
+        // For BELOW: only use token A
+        finalAmountA = walletA < requiredA ? walletA : requiredA;
+        finalAmountB = BigInt(0);
+      } else {
+        // For ABOVE: only use token B
+        finalAmountA = BigInt(0);
+        finalAmountB = walletB < requiredB ? walletB : requiredB;
+      }
+      
+      // Apply safety buffers
+      const { usableTokenA, usableTokenB } = applySafetyBuffers(finalAmountA, finalAmountB);
+      finalAmountA = usableTokenA;
+      finalAmountB = usableTokenB;
+      
       logger.info(`Final Amount A: ${finalAmountA.toString()}`);
       logger.info(`Final Amount B: ${finalAmountB.toString()}`);
+      logger.info('========================================');
       
-      // Step 6: Check if amounts are valid
-      if (finalAmountA <= BigInt(0) && finalAmountB <= BigInt(0)) {
-        logger.warn('⚠️  WARNING: Both token amounts are zero or negative!');
-        logger.warn('Cannot add liquidity with invalid amounts.');
-        logger.warn('Aborting liquidity addition - position will remain open without liquidity.');
-        logger.warn('Manual intervention may be required.');
+      // Step 6: Validation BEFORE addLiquidity
+      logger.info('=== Step 6: Validation Before addLiquidity ===');
+      let validationPassed = false;
+      
+      if (pricePosition === PricePosition.INSIDE) {
+        if (finalAmountA > BigInt(0) && finalAmountB > BigInt(0)) {
+          logger.info('✅ Validation PASSED: Both tokens have positive amounts (INSIDE position)');
+          validationPassed = true;
+        } else {
+          logger.error('❌ Validation FAILED: INSIDE position requires both tokens > 0');
+          logger.error(`  Final Amount A: ${finalAmountA.toString()}`);
+          logger.error(`  Final Amount B: ${finalAmountB.toString()}`);
+        }
+      } else if (pricePosition === PricePosition.BELOW) {
+        if (finalAmountA > BigInt(0)) {
+          logger.info('✅ Validation PASSED: Token A has positive amount (BELOW position)');
+          validationPassed = true;
+        } else {
+          logger.error('❌ Validation FAILED: BELOW position requires Token A > 0');
+          logger.error(`  Final Amount A: ${finalAmountA.toString()}`);
+        }
+      } else {
+        // ABOVE
+        if (finalAmountB > BigInt(0)) {
+          logger.info('✅ Validation PASSED: Token B has positive amount (ABOVE position)');
+          validationPassed = true;
+        } else {
+          logger.error('❌ Validation FAILED: ABOVE position requires Token B > 0');
+          logger.error(`  Final Amount B: ${finalAmountB.toString()}`);
+        }
+      }
+      
+      if (!validationPassed) {
+        logger.error('⚠️  ABORTING: Validation failed - cannot add liquidity');
+        logger.error('Position will remain open without liquidity.');
+        logger.error('Manual intervention may be required.');
         
         // Clear state to return to monitoring
         this.stateManager.clearState();
         
         return;
       }
-      logger.info('========================================');
+      logger.info('===============================================');
       
-      // Step 7: Calculate actual value being added
+      // Step 7: Log comprehensive summary
       const { totalValue: actualAddedValue } = calculateQuoteValue(
         finalAmountA,
         finalAmountB,
@@ -545,13 +650,17 @@ export class RebalanceService {
         ? ((actualAddedValue - closedPositionValue) / closedPositionValue) * 100 
         : 0;
       
-      // Step 8: Log comprehensive value tracking
-      logger.info('=== VALUE-BASED LIQUIDITY SUMMARY ===');
+      logger.info('=== CLMM LIQUIDITY ADDITION SUMMARY ===');
+      logger.info(`Price Position: ${pricePosition}`);
+      logger.info(`Required Token A: ${requiredA.toString()}`);
+      logger.info(`Required Token B: ${requiredB.toString()}`);
+      logger.info(`Final Amount A: ${finalAmountA.toString()}`);
+      logger.info(`Final Amount B: ${finalAmountB.toString()}`);
       logger.info(`Closed Position Value: ${closedPositionValue.toFixed(6)}`);
       logger.info(`Target Liquidity Value: ${targetLiquidityValue.toFixed(6)}`);
       logger.info(`Actual Added Value: ${actualAddedValue.toFixed(6)}`);
       logger.info(`Value Difference: ${valueDifferencePercent.toFixed(2)}%`);
-      logger.info('======================================');
+      logger.info('=======================================');
       
       logger.info('Adding liquidity to position...');
       logger.info(`  Using Token A: ${finalAmountA.toString()}`);
