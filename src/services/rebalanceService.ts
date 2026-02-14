@@ -6,6 +6,7 @@ import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 import { logPTBValidation } from '../utils/botLogger';
 import { explainError } from '../utils/errorExplainer';
+import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
 import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
 import { PTBValidator } from '../utils/ptbValidator';
 import { safeMergeCoins, safeTransferObjects, safeUseNestedResult, safeUseNestedResultOptional } from '../utils/ptbHelpers';
@@ -36,13 +37,29 @@ export class RebalanceService {
   }
   
   async rebalance(pool: Pool, position: Position): Promise<void> {
+    // Set Sentry context with pool and position metadata
+    setSentryContext({
+      poolId: pool.id,
+      positionId: position.id,
+      stage: 'rebalance_start',
+    });
+    
+    addSentryBreadcrumb('Starting rebalance', 'rebalance', {
+      poolId: pool.id,
+      positionId: position.id,
+      currentTick: pool.currentTick,
+      positionRange: `[${position.tickLower}, ${position.tickUpper}]`,
+    });
+    
     try {
       logger.info('=== Starting Atomic PTB Rebalance ===');
       
       // Pre-execution validation
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'pre_execution_validation' });
       await this.suiClient.checkGasPrice();
       
       // Calculate new range with validated tick spacing
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'calculate_range' });
       const newRange = calculateTickRange(
         pool.currentTick,
         this.config.rangeWidthPercent,
@@ -53,12 +70,18 @@ export class RebalanceService {
       logger.info(`Old range: [${position.tickLower}, ${position.tickUpper}]`);
       logger.info(`New range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
       
+      addSentryBreadcrumb('Calculated new range', 'rebalance', {
+        oldRange: `[${position.tickLower}, ${position.tickUpper}]`,
+        newRange: `[${newRange.tickLower}, ${newRange.tickUpper}]`,
+      });
+      
       // Validate tick spacing alignment
       if (newRange.tickLower % pool.tickSpacing !== 0 || newRange.tickUpper % pool.tickSpacing !== 0) {
         throw new Error('New range ticks not aligned to tick spacing');
       }
       
       // Calculate expected amounts with slippage protection
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'calculate_amounts' });
       // FIXED: Use bigint arithmetic to avoid precision loss
       const expectedAmounts = this.calculateExpectedAmounts(pool, position);
       const slippagePercent = BigInt(Math.floor(this.config.maxSlippagePercent * 100)); // Convert to basis points
@@ -69,6 +92,12 @@ export class RebalanceService {
       logger.info(`Min amounts (${this.config.maxSlippagePercent}% slippage): A=${minAmountA}, B=${minAmountB}`);
       
       // Build single atomic PTB with pre-build validation
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'build_ptb' });
+      addSentryBreadcrumb('Building PTB', 'rebalance', {
+        minAmountA: minAmountA.toString(),
+        minAmountB: minAmountB.toString(),
+      });
+      
       // @copilot PTB validation happens inside buildRebalancePTB to catch errors early
       const ptb = await this.buildRebalancePTB(pool, position, newRange, minAmountA, minAmountB);
       
@@ -76,8 +105,18 @@ export class RebalanceService {
       PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
       
       // Execute atomically (single execution)
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'execute_ptb' });
+      addSentryBreadcrumb('Executing PTB', 'rebalance', {
+        poolId: pool.id,
+        positionId: position.id,
+      });
+      
       logger.info('Executing atomic PTB...');
       const result = await this.suiClient.executeTransactionWithoutSimulation(ptb);
+      
+      addSentryBreadcrumb('Rebalance completed successfully', 'rebalance', {
+        digest: result.digest,
+      });
       
       logger.info(`✅ Rebalance successful! Digest: ${result.digest}`);
       logger.info('=== Atomic PTB Rebalance Complete ===');
@@ -121,6 +160,12 @@ export class RebalanceService {
       logger.error(error as Error);
       
       logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      
+      // Capture error in Sentry with pool and position context
+      captureException(error, {
+        poolId: pool.id,
+        positionId: position.id,
+      });
       
       // Re-throw the error - don't suppress it
       throw error;
