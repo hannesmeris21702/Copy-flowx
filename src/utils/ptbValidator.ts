@@ -72,8 +72,10 @@ export class PTBValidator {
         // Parse error type for Copilot suggestions
         if (errorMsg.includes('SecondaryIndexOutOfBounds')) {
           const match = errorMsg.match(/result_idx:(\d+) secondary_idx:(\d+)/);
-          const resultIdx = match?.[1] !== undefined ? parseInt(match[1]) : undefined;
-          const secondaryIdx = match?.[2] !== undefined ? parseInt(match[2]) : undefined;
+          const matchGroup1 = match?.[1];
+          const matchGroup2 = match?.[2];
+          const resultIdx = matchGroup1 !== undefined ? parseInt(matchGroup1) : undefined;
+          const secondaryIdx = matchGroup2 !== undefined ? parseInt(matchGroup2) : undefined;
           
           const fixSuggestion = [
             '@copilot Fix: Use conditional mergeCoins pattern.',
