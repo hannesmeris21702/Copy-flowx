@@ -488,12 +488,13 @@ export class RebalanceService {
       logger.info(`Available Value (after swap): ${availableValue.toFixed(6)}`);
       
       // Step 2: Determine target liquidity value
+      logger.info('=== Step 2: Determine Target Liquidity Value ===');
       const targetLiquidityValue = Math.min(closedPositionValue, availableValue);
       logger.info(`Target Liquidity Value: ${targetLiquidityValue.toFixed(6)}`);
-      logger.info('=========================================');
+      logger.info('=================================================');
       
       // Step 3: Convert target value to required amounts for the new tick range
-      logger.info('=== Step 2: Convert Value to Token Amounts ===');
+      logger.info('=== Step 3: Convert Value to Token Amounts ===');
       const { amountA: amountA_needed, amountB: amountB_needed } = calculateAmountsFromValue(
         targetLiquidityValue,
         sqrtPrice,
@@ -505,7 +506,7 @@ export class RebalanceService {
       logger.info('===============================================');
       
       // Step 4: Apply safety buffers
-      logger.info('=== Step 3: Apply Safety Buffers ===');
+      logger.info('=== Step 4: Apply Safety Buffers ===');
       const { usableTokenA, usableTokenB } = applySafetyBuffers(availableA, availableB);
       logger.info(`Available Token A: ${availableA.toString()}`);
       logger.info(`Usable Token A (98%): ${usableTokenA.toString()}`);
@@ -514,7 +515,7 @@ export class RebalanceService {
       logger.info('=====================================');
       
       // Step 5: Calculate final amounts (min of needed vs usable)
-      logger.info('=== Step 4: Determine Final Amounts ===');
+      logger.info('=== Step 5: Determine Final Amounts ===');
       const finalAmountA = amountA_needed < usableTokenA ? amountA_needed : usableTokenA;
       const finalAmountB = amountB_needed < usableTokenB ? amountB_needed : usableTokenB;
       logger.info(`Final Amount A: ${finalAmountA.toString()}`);
