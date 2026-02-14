@@ -10,7 +10,7 @@ import { setSentryContext, addSentryBreadcrumb, captureException } from '../util
 import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
 import { PTBValidator } from '../utils/ptbValidator';
 import { PTBPreExecutionValidator } from '../utils/ptbPreExecutionValidator';
-import { safeMergeCoins, safeTransferObjects, safeUseNestedResult, safeUseNestedResultOptional } from '../utils/ptbHelpers';
+import { safeMergeCoins, safeUseNestedResult } from '../utils/ptbHelpers';
 import {
   calculateTickRange,
   tickToSqrtPrice,
@@ -390,10 +390,10 @@ export class RebalanceService {
     const tickLowerU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickLower)));
     const tickUpperU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickUpper)));
     
-    // FIXED: open_position returns multiple values (Position NFT, Coin<A>, Coin<B>)
-    // SAFETY: Do NOT assume result[0] exists - check before referencing NestedResult[x,0]
-    // Store full result, then validate structure before extracting position NFT
-    const openPositionResult = ptb.moveCall({
+    // FIXED: open_position returns a SINGLE Position NFT object (not a tuple)
+    // Do NOT use array destructuring or access [0] - it causes SecondaryIndexOutOfBounds error
+    // The moveCall result itself IS the Position NFT
+    const newPosition = ptb.moveCall({
       target: `${packageId}::pool_script::open_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
@@ -404,35 +404,7 @@ export class RebalanceService {
       ],
     });
     
-    // SAFETY: Check that open_position MoveCall returns at least 1 object
-    // Do NOT assume result[0] exists - only reference NestedResult[x,0] if valid
-    // 
-    // NOTE: Under normal operation, open_position ALWAYS returns (Position NFT, Coin<A>, Coin<B>)
-    // This defensive check handles exceptional edge cases where:
-    // - Contract behavior differs from expected (defensive programming)
-    // - API mismatch or version incompatibility
-    // - Unexpected runtime conditions in the Move function
-    // 
-    // If such an edge case occurs, requirements specify: skip transferObjects,
-    // allow transaction to complete normally to prevent transaction failure
-    //
-    // Extract position NFT using safe helper to avoid direct indexing
-    // If the result doesn't contain a position at index 0, newPosition will be undefined
-    const newPosition = safeUseNestedResultOptional(
-      openPositionResult,
-      0,
-      'position NFT from open_position'
-    );
-    
-    // Verify extraction succeeded
-    if (newPosition) {
-      logger.info('  ✓ Captured: newPosition NFT from result[0]');
-    } else {
-      // Unexpected condition: open_position should always return position NFT
-      // Log as warning - this indicates a potential issue that should be monitored
-      logger.warn('  ⚠ Position NFT not available from result[0] - unexpected condition in open_position');
-      logger.warn('  This should be investigated - open_position normally returns a position NFT');
-    }
+    logger.info('  ✓ Captured: newPosition NFT from open_position (single value return)');
     
     // ============================================================================
     // Step 5.5: Validate coins before add_liquidity_by_fix_coin
@@ -467,61 +439,32 @@ export class RebalanceService {
     
     logger.info('  ✓ Both coins validated: finalCoinA and finalCoinB ready');
     
-    // SAFETY CHECK: Use safeTransfer helper for position NFT transfer
-    // The helper checks if position NFT exists before calling transferObjects
-    // Per requirements: if no position NFT, skip transferObjects and allow transaction to complete normally
-    if (newPosition) {
-      // Step 6: Add liquidity to new position
-      // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-      logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
-      
-      ptb.moveCall({
-        target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
-        typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-        arguments: [
-          ptb.object(globalConfigId),
-          ptb.object(pool.id),
-          newPosition,
-          finalCoinA,
-          finalCoinB,
-          ptb.pure.u64(minAmountA.toString()),
-          ptb.pure.u64(minAmountB.toString()),
-          ptb.pure.bool(true), // fix_amount_a
-          ptb.object(SUI_CLOCK_OBJECT_ID),
-        ],
-      });
-      logger.info('  ✓ Liquidity added, coins consumed');
-      
-      // Step 7: Transfer new position NFT to sender using safe helper
-      // safeTransferObjects checks if object exists before transferring
-      logger.info('Step 7: Transfer newPosition NFT to sender');
-      safeTransferObjects(
-        ptb,
+    // Step 6: Add liquidity to new position
+    // open_position always returns a valid position NFT, so we can proceed directly
+    // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
+    logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
+    
+    ptb.moveCall({
+      target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
+      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
+      arguments: [
+        ptb.object(globalConfigId),
+        ptb.object(pool.id),
         newPosition,
-        ptb.pure.address(this.suiClient.getAddress()),
-        { description: 'position NFT to sender' }
-      );
-      logger.info('  ✓ Position transferred');
-    } else {
-      // Per requirements: If no position NFT is returned, skip transferObjects
-      // and allow transaction to complete normally (without position-dependent operations)
-      //
-      // NOTE: This path represents an EXCEPTIONAL condition that should not occur in normal operation
-      // Under normal circumstances, open_position always returns a position NFT
-      // 
-      // System state after this path:
-      // - Fee collection: completed ✓
-      // - Old position: closed ✓
-      // - New position: NOT created (edge case handling)
-      // - Coins: unconsumed but available
-      // 
-      // The system remains in a valid state (no dangling references), though rebalancing is incomplete
-      // This defensive approach prevents transaction failure, allowing monitoring and investigation
-      // rather than blocking all subsequent operations
-      logger.warn('Skipping add_liquidity and transfer - position NFT not available (EXCEPTIONAL)');
-      logger.info('Transaction will complete without position-dependent operations');
-      logger.info('Coins remain unconsumed but transaction is valid - investigation recommended');
-    }
+        finalCoinA,
+        finalCoinB,
+        ptb.pure.u64(minAmountA.toString()),
+        ptb.pure.u64(minAmountB.toString()),
+        ptb.pure.bool(true), // fix_amount_a
+        ptb.object(SUI_CLOCK_OBJECT_ID),
+      ],
+    });
+    logger.info('  ✓ Liquidity added, coins consumed');
+    
+    // Step 7: Transfer new position NFT to sender
+    logger.info('Step 7: Transfer newPosition NFT to sender');
+    ptb.transferObjects([newPosition], ptb.pure.address(this.suiClient.getAddress()));
+    logger.info('  ✓ Position transferred');
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
     logger.info('Flow: zeroCoin creation → collect_fee (side effects) → close_position (side effects) → split zero coins → swap (if needed) → open → add_liquidity → transfer');
