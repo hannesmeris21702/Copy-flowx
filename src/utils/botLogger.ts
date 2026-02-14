@@ -27,10 +27,62 @@ interface PTBCommandInfo {
 }
 
 /**
- * Current bot step context for grouping related logs
+ * PTB data structure for validation logging
  */
-let currentStep: BotStep | null = null;
-let stepStartTime: number | null = null;
+interface PTBData {
+  commands: Array<{
+    $kind?: string;
+    kind?: string;
+    [key: string]: any;
+  }>;
+  [key: string]: any;
+}
+
+/**
+ * Swap direction enum for type safety
+ */
+export enum SwapDirection {
+  A_TO_B = 'A_to_B',
+  B_TO_A = 'B_to_A',
+  NONE = 'none'
+}
+
+/**
+ * Bot step context for managing step state in a thread-safe manner
+ */
+class BotStepContext {
+  private step: BotStep | null = null;
+  private startTime: number | null = null;
+
+  setStep(step: BotStep): void {
+    this.step = step;
+    this.startTime = Date.now();
+  }
+
+  clearStep(): void {
+    this.step = null;
+    this.startTime = null;
+  }
+
+  getStep(): BotStep | null {
+    return this.step;
+  }
+
+  getStartTime(): number | null {
+    return this.startTime;
+  }
+
+  getDuration(): number | null {
+    if (this.startTime === null) return null;
+    return Date.now() - this.startTime;
+  }
+}
+
+/**
+ * Current bot step context - isolated per operation
+ * Note: For true concurrency support, consider using AsyncLocalStorage
+ */
+const context = new BotStepContext();
 
 /**
  * Bot logger for structured logging with step grouping and PTB command tracking
@@ -40,8 +92,7 @@ export class BotLogger {
    * Begin a new bot step/stage
    */
   static beginStep(step: BotStep, description?: string): void {
-    currentStep = step;
-    stepStartTime = Date.now();
+    context.setStep(step);
     
     const separator = '='.repeat(70);
     logger.info(separator);
@@ -53,20 +104,23 @@ export class BotLogger {
    * End the current bot step
    */
   static endStep(): void {
-    if (currentStep && stepStartTime) {
-      const duration = Date.now() - stepStartTime;
+    const currentStep = context.getStep();
+    const duration = context.getDuration();
+    
+    if (currentStep && duration !== null) {
       const separator = '='.repeat(70);
       logger.info(`✓ END STEP: ${currentStep} (completed in ${duration}ms)`);
       logger.info(separator);
     }
-    currentStep = null;
-    stepStartTime = null;
+    
+    context.clearStep();
   }
 
   /**
    * Log a message within the current step
    */
   static stepInfo(message: string): void {
+    const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
     logger.info(`${prefix}${message}`);
   }
@@ -75,6 +129,7 @@ export class BotLogger {
    * Log a warning within the current step
    */
   static stepWarn(message: string): void {
+    const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
     logger.warn(`${prefix}${message}`);
   }
@@ -83,6 +138,7 @@ export class BotLogger {
    * Log an error within the current step
    */
   static stepError(message: string, error?: Error): void {
+    const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
     logger.error(`${prefix}${message}`, error);
   }
@@ -91,6 +147,7 @@ export class BotLogger {
    * Log a debug message within the current step
    */
   static stepDebug(message: string): void {
+    const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
     logger.debug(`${prefix}${message}`);
   }
@@ -148,11 +205,11 @@ export class BotLogger {
   /**
    * Log PTB validation with detailed command structure
    */
-  static logPTBValidation(ptbData: any): void {
+  static logPTBValidation(ptbData: PTBData): void {
     logger.info('=== PTB COMMANDS PRE-BUILD VALIDATION ===');
     logger.info(`Total commands: ${ptbData.commands.length}`);
     
-    ptbData.commands.forEach((cmd: any, idx: number) => {
+    ptbData.commands.forEach((cmd, idx) => {
       const cmdType = cmd.$kind || cmd.kind || 'unknown';
       const cmdStr = JSON.stringify(cmd);
       const truncatedCmd = cmdStr.length > 300 ? cmdStr.substring(0, 300) + '...' : cmdStr;
@@ -166,17 +223,18 @@ export class BotLogger {
    * Log swap operation details
    */
   static logSwap(params: {
-    direction: 'A_to_B' | 'B_to_A' | 'none';
+    direction: SwapDirection;
     reason?: string;
     inputAmount?: string;
     outputAmount?: string;
   }): void {
+    const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
     
-    if (params.direction === 'none') {
+    if (params.direction === SwapDirection.NONE) {
       logger.info(`${prefix}⊘ Swap: Not needed${params.reason ? ` - ${params.reason}` : ''}`);
     } else {
-      const arrow = params.direction === 'A_to_B' ? '→' : '←';
+      const arrow = params.direction === SwapDirection.A_TO_B ? '→' : '←';
       logger.info(`${prefix}🔄 Swap: ${params.direction.replace('_', ' ')} ${arrow}`);
       if (params.reason) {
         logger.info(`${prefix}  Reason: ${params.reason}`);
@@ -199,6 +257,7 @@ export class BotLogger {
     tickUpper: number;
     success: boolean;
   }): void {
+    const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
     const status = params.success ? '✓' : '✗';
     
@@ -216,6 +275,7 @@ export class BotLogger {
     amountB: string;
     success: boolean;
   }): void {
+    const currentStep = context.getStep();
     const prefix = currentStep ? `[${currentStep}] ` : '';
     const status = params.success ? '✓' : '✗';
     
