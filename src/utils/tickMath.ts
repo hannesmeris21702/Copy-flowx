@@ -185,3 +185,139 @@ export function calculateQuoteValue(
   
   return { valueA, valueB, totalValue };
 }
+
+/**
+ * Calculate optimal token ratio for a given price range
+ * This determines the ideal tokenA/tokenB ratio needed to provide liquidity at current price
+ * 
+ * @param currentSqrtPrice Current sqrt price from pool
+ * @param tickLower Lower tick of the range
+ * @param tickUpper Upper tick of the range
+ * @returns Optimal ratio as amountA/amountB (or Infinity if only A needed, 0 if only B needed)
+ */
+export function calculateOptimalRatio(
+  currentSqrtPrice: bigint,
+  tickLower: number,
+  tickUpper: number
+): number {
+  const sqrtPriceLower = tickToSqrtPrice(tickLower);
+  const sqrtPriceUpper = tickToSqrtPrice(tickUpper);
+  
+  // If current price is below range, only tokenA is needed
+  if (currentSqrtPrice <= sqrtPriceLower) {
+    return Infinity;
+  }
+  
+  // If current price is above range, only tokenB is needed
+  if (currentSqrtPrice >= sqrtPriceUpper) {
+    return 0;
+  }
+  
+  // Current price is in range - need both tokens
+  // For a unit of liquidity, calculate required amounts
+  const liquidity = BigInt(1e18); // Use a large unit for precision
+  
+  const amountA = getAmountAFromLiquidity(currentSqrtPrice, sqrtPriceUpper, liquidity);
+  const amountB = getAmountBFromLiquidity(sqrtPriceLower, currentSqrtPrice, liquidity);
+  
+  if (amountB === BigInt(0)) {
+    return Infinity;
+  }
+  
+  // Return ratio as amountA / amountB
+  return Number(amountA) / Number(amountB);
+}
+
+/**
+ * Check if swap is required based on ratio mismatch
+ * 
+ * @param availableA Amount of tokenA available
+ * @param availableB Amount of tokenB available
+ * @param currentSqrtPrice Current sqrt price from pool
+ * @param tickLower Lower tick of new range
+ * @param tickUpper Upper tick of new range
+ * @param tolerancePercent Tolerance for ratio mismatch (default 5%)
+ * @returns Object with swapRequired flag and details
+ */
+export function checkSwapRequired(
+  availableA: bigint,
+  availableB: bigint,
+  currentSqrtPrice: bigint,
+  tickLower: number,
+  tickUpper: number,
+  tolerancePercent: number = 5
+): {
+  swapRequired: boolean;
+  optimalRatio: number;
+  availableRatio: number;
+  ratioMismatchPercent: number;
+  reason: string;
+} {
+  // Calculate optimal ratio for the new range
+  const optimalRatio = calculateOptimalRatio(currentSqrtPrice, tickLower, tickUpper);
+  
+  // Calculate available ratio
+  let availableRatio: number;
+  if (availableB === BigInt(0)) {
+    availableRatio = Infinity;
+  } else {
+    availableRatio = Number(availableA) / Number(availableB);
+  }
+  
+  // Handle special cases
+  if (optimalRatio === Infinity && availableRatio === Infinity) {
+    // Both infinite (only A needed, only A available) - no swap needed
+    return {
+      swapRequired: false,
+      optimalRatio,
+      availableRatio,
+      ratioMismatchPercent: 0,
+      reason: 'Only tokenA needed and available',
+    };
+  }
+  
+  if (optimalRatio === 0 && availableB > BigInt(0) && availableA === BigInt(0)) {
+    // Only B needed, only B available - no swap needed
+    return {
+      swapRequired: false,
+      optimalRatio,
+      availableRatio: 0,
+      ratioMismatchPercent: 0,
+      reason: 'Only tokenB needed and available',
+    };
+  }
+  
+  if (optimalRatio === Infinity || availableRatio === Infinity) {
+    // One is infinite but not both - swap needed
+    return {
+      swapRequired: true,
+      optimalRatio,
+      availableRatio,
+      ratioMismatchPercent: 100,
+      reason: 'Ratio mismatch: one token exclusively needed but both available',
+    };
+  }
+  
+  // Calculate ratio mismatch percentage
+  // Use relative difference: |optimal - available| / optimal * 100
+  let ratioMismatchPercent: number;
+  if (optimalRatio === 0) {
+    ratioMismatchPercent = availableRatio > 0 ? 100 : 0;
+  } else {
+    ratioMismatchPercent = Math.abs(optimalRatio - availableRatio) / optimalRatio * 100;
+  }
+  
+  const swapRequired = ratioMismatchPercent > tolerancePercent;
+  
+  const reason = swapRequired
+    ? `Ratio mismatch ${ratioMismatchPercent.toFixed(2)}% exceeds tolerance ${tolerancePercent}%`
+    : `Ratio mismatch ${ratioMismatchPercent.toFixed(2)}% within tolerance ${tolerancePercent}%`;
+  
+  return {
+    swapRequired,
+    optimalRatio,
+    availableRatio,
+    ratioMismatchPercent,
+    reason,
+  };
+}

@@ -4,7 +4,7 @@ import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
-import { calculateQuoteValue } from '../utils/tickMath';
+import { calculateQuoteValue, calculateTickRange, checkSwapRequired } from '../utils/tickMath';
 
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
@@ -13,14 +13,16 @@ BigInt.prototype.toJSON = function() { return this.toString(); };
 export class RebalanceService {
   private suiClient: SuiClientService;
   private cetusService: CetusService;
+  private config: BotConfig;
   
   constructor(
     suiClient: SuiClientService,
     cetusService: CetusService,
-    _config: BotConfig  // Prefix with underscore to indicate intentionally unused
+    config: BotConfig
   ) {
     this.suiClient = suiClient;
     this.cetusService = cetusService;
+    this.config = config;
   }
   
   async rebalance(pool: Pool, position: Position): Promise<void> {
@@ -103,6 +105,42 @@ export class RebalanceService {
       logger.info('This totalValue MUST be preserved when opening new position');
       logger.info('=============================================');
       
+      // Calculate new range for potential position reopening
+      currentStage = 'calculate_new_range';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      logger.info('Calculating new position range...');
+      
+      const newRange = calculateTickRange(
+        pool.currentTick,
+        this.config.rangeWidthPercent,
+        pool.tickSpacing
+      );
+      
+      logger.info(`New range calculated: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+      
+      // Check if swap is required
+      currentStage = 'check_swap_required';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      logger.info('Checking if swap is required...');
+      
+      const swapCheck = checkSwapRequired(
+        availableA,
+        availableB,
+        sqrtPrice,
+        newRange.tickLower,
+        newRange.tickUpper,
+        this.config.swapRatioTolerancePercent
+      );
+      
+      logger.info('=== Swap Requirement Analysis ===');
+      logger.info(`Optimal Ratio (A/B): ${swapCheck.optimalRatio === Infinity ? 'Infinity (only A needed)' : swapCheck.optimalRatio.toFixed(6)}`);
+      logger.info(`Available Ratio (A/B): ${swapCheck.availableRatio === Infinity ? 'Infinity (only A available)' : swapCheck.availableRatio.toFixed(6)}`);
+      logger.info(`Ratio Mismatch: ${swapCheck.ratioMismatchPercent.toFixed(2)}%`);
+      logger.info(`Tolerance: ${this.config.swapRatioTolerancePercent}%`);
+      logger.info(`Swap Required: ${swapCheck.swapRequired ? 'YES' : 'NO'}`);
+      logger.info(`Reason: ${swapCheck.reason}`);
+      logger.info('=================================');
+      
       addSentryBreadcrumb('Wallet balances queried', 'rebalance', {
         positionId: position.id,
         availableA: availableA.toString(),
@@ -110,6 +148,16 @@ export class RebalanceService {
         valueA: valueA.toString(),
         valueB: valueB.toString(),
         totalValue: totalValue.toString(),
+      });
+      
+      addSentryBreadcrumb('Swap requirement checked', 'rebalance', {
+        positionId: position.id,
+        swapRequired: swapCheck.swapRequired,
+        optimalRatio: swapCheck.optimalRatio.toString(),
+        availableRatio: swapCheck.availableRatio.toString(),
+        ratioMismatchPercent: swapCheck.ratioMismatchPercent.toString(),
+        newRangeLower: newRange.tickLower,
+        newRangeUpper: newRange.tickUpper,
       });
       
       addSentryBreadcrumb('Position closed successfully', 'rebalance', {

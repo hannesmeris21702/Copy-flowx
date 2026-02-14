@@ -11,6 +11,7 @@ export interface BotConfig {
   minRetryDelayMs: number;
   maxRetryDelayMs: number;
   maxRetries: number;
+  swapRatioTolerancePercent: number;
 }
 
 export interface Position {
