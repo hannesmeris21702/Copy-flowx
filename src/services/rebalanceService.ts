@@ -218,6 +218,31 @@ export class RebalanceService {
         logger.info('No swap required - token ratio is acceptable');
       }
       
+      // Open new position
+      currentStage = 'open_position';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      logger.info('Opening new position...');
+      
+      const newPositionId = await this.openPosition(
+        pool,
+        newRange.tickLower,
+        newRange.tickUpper
+      );
+      
+      logger.info('=== New Position Created ===');
+      logger.info(`Position ID: ${newPositionId}`);
+      logger.info(`Tick range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+      logger.info('Note: Position created WITHOUT liquidity');
+      logger.info('Liquidity can be added in a separate transaction');
+      logger.info('============================');
+      
+      addSentryBreadcrumb('New position opened', 'rebalance', {
+        oldPositionId: position.id,
+        newPositionId: newPositionId,
+        tickLower: newRange.tickLower,
+        tickUpper: newRange.tickUpper,
+      });
+      
       addSentryBreadcrumb('Wallet balances queried', 'rebalance', {
         positionId: position.id,
         availableA: availableA.toString(),
@@ -241,7 +266,7 @@ export class RebalanceService {
         positionId: position.id,
       });
       
-      logger.info('=== Position Closure Complete ===');
+      logger.info('=== Rebalance Complete ===');
       
     } catch (error) {
       // Use error explainer to provide clear guidance
@@ -363,5 +388,88 @@ export class RebalanceService {
     await this.suiClient.executeSDKPayload(tx);
     
     logger.info('✅ Swap executed successfully');
+  }
+  
+  /**
+   * Open a new position using Cetus SDK
+   * Creates position NFT without adding liquidity
+   * @returns The position ID (NFT object ID)
+   */
+  private async openPosition(
+    pool: Pool,
+    tickLower: number,
+    tickUpper: number
+  ): Promise<string> {
+    const sdk = this.cetusService.getSDK();
+    
+    logger.info('Opening new position...');
+    logger.info(`  Tick range: [${tickLower}, ${tickUpper}]`);
+    logger.info(`  Pool: ${pool.id}`);
+    
+    // Build the open position transaction using Cetus SDK
+    // This creates the position NFT without adding liquidity
+    const tx = await sdk.Position.openPositionTransactionPayload({
+      pool_id: pool.id,
+      coinTypeA: pool.coinTypeA,
+      coinTypeB: pool.coinTypeB,
+      tick_lower: tickLower.toString(),
+      tick_upper: tickUpper.toString(),
+    });
+    
+    // Execute the transaction and wait for confirmation
+    const result = await this.suiClient.executeSDKPayload(tx);
+    
+    // Extract position ID (NFT) from transaction response
+    // The position NFT is created as a new object
+    const positionId = this.extractPositionIdFromResponse(result);
+    
+    if (!positionId) {
+      throw new Error('Failed to extract position ID from transaction response');
+    }
+    
+    logger.info('✅ Position opened successfully');
+    logger.info(`  Position ID: ${positionId}`);
+    
+    return positionId;
+  }
+  
+  /**
+   * Extract position ID from transaction response
+   * Looks for newly created position NFT object
+   */
+  private extractPositionIdFromResponse(
+    response: any
+  ): string | null {
+    try {
+      // Check objectChanges for created objects
+      const objectChanges = response.objectChanges || [];
+      
+      // Find the created position NFT
+      // Position NFTs are created with type containing "Position" or "position"
+      for (const change of objectChanges) {
+        if (change.type === 'created') {
+          const objectType = change.objectType || '';
+          
+          // Check if this is a position NFT
+          // Cetus position NFTs typically have type like: "0x...::position::Position"
+          if (objectType.toLowerCase().includes('position')) {
+            return change.objectId;
+          }
+        }
+      }
+      
+      // Fallback: check effects.created
+      const created = response.effects?.created || [];
+      if (created.length > 0) {
+        // Return the first created object (likely the position NFT)
+        const firstCreated = created[0];
+        return firstCreated.reference?.objectId || firstCreated.objectId || null;
+      }
+      
+      return null;
+    } catch (error) {
+      logger.error('Error extracting position ID from response', error);
+      return null;
+    }
   }
 }
