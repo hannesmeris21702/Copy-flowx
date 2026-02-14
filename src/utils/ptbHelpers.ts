@@ -329,18 +329,20 @@ export function safeUseNestedResult<T = TransactionObjectArgument>(
   }
 
   // Handle object-like result with indexed access
+  // IMPORTANT: For Sui SDK moveCall results, result[0], result[1], etc. are ALWAYS defined
+  // and automatically create NestedResult references. We should NOT fall back to returning
+  // the result itself just because element === undefined fails the check.
   if (typeof result === 'object') {
-    // Try to access the index
+    // For Sui SDK results, direct indexing creates proper NestedResult references
+    // We should ALWAYS use the indexed access, not fall back to the whole result
     const element = (result as IndexableResult)[index];
+    
+    // Only throw if explicitly checking for out-of-bounds after confirming element doesn't exist
+    // For Sui SDK, element will be a Proxy/NestedResult object, never undefined for valid indices
     if (element === undefined) {
-      // If index is 0 and no [0] property, maybe the result itself is the value
-      if (index === 0) {
-        logger.debug(`✓ Using result directly as ${description} (no array indexing)`);
-        return result as T;
-      }
-
       throw new PTBHelperError(
-        `Cannot extract nested result at index ${index}: element is undefined`,
+        `Cannot extract nested result at index ${index}: element is undefined. ` +
+        `This likely means the moveCall doesn't return a value at index ${index}.`,
         'safeUseNestedResult',
         description
       );
