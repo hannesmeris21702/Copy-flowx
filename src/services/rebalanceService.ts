@@ -277,17 +277,15 @@ export class RebalanceService {
     });
     
     // SAFETY: Check that open_position MoveCall returns at least 1 object
-    // Only reference NestedResult[x,0] if the result array has elements
+    // Do NOT assume result[0] exists - only reference NestedResult[x,0] if valid
     // Extract position NFT using array destructuring to create NestedResult[x,0] reference
-    let newPosition: TransactionObjectArgument | undefined;
-    try {
-      // Attempt array destructuring - this will create NestedResult[x,0]
-      // If moveCall result structure is unexpected, this may fail
-      [newPosition] = openPositionResult;
+    const [newPosition] = openPositionResult;
+    
+    // Log extraction result for debugging
+    if (newPosition) {
       logger.info('  ✓ Captured: newPosition NFT from result[0]');
-    } catch (error) {
-      logger.warn(`  ⚠ Failed to extract position NFT: ${error}`);
-      newPosition = undefined;
+    } else {
+      logger.warn('  ⚠ Position NFT not available from result[0]');
     }
     
     // ============================================================================
@@ -315,10 +313,10 @@ export class RebalanceService {
     
     logger.info('  ✓ Both coins validated: finalCoinA and finalCoinB ready');
     
-    // SAFETY CHECK: Before calling ptb.transferObjects, verify position NFT was extracted successfully
+    // SAFETY CHECK: Before calling ptb.transferObjects, verify position NFT exists
     // Only proceed with add_liquidity and transfer if we have a valid position reference
-    // If no position NFT: skip transferObjects, allow transaction to complete normally
-    if (newPosition !== undefined) {
+    // Per requirements: if no position NFT, skip transferObjects and allow transaction to complete normally
+    if (newPosition) {
       // Step 6: Add liquidity to new position
       // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
       logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
@@ -346,8 +344,9 @@ export class RebalanceService {
       ptb.transferObjects([newPosition], ptb.pure.address(this.suiClient.getAddress()));
       logger.info('  ✓ Position transferred');
     } else {
-      // If position NFT extraction failed: skip transferObjects, allow transaction to complete normally
-      logger.warn('Skipping add_liquidity and transfer - position NFT extraction failed');
+      // Per requirements: If no position NFT is returned, skip transferObjects
+      // and allow transaction to complete normally (without position-dependent operations)
+      logger.warn('Skipping add_liquidity and transfer - position NFT not available');
       logger.info('Transaction will complete without position-dependent operations');
     }
     
