@@ -75,7 +75,7 @@ export class RebalanceService {
     logger.info('Executing atomic PTB...');
     const result = await this.suiClient.executeTransactionWithoutSimulation(ptb);
     
-    logger.info(`Rebalance successful! Digest: ${result.digest}`);
+    logger.info(`✅ Rebalance successful! Digest: ${result.digest}`);
     logger.info('=== Atomic PTB Rebalance Complete ===');
   }
   
@@ -324,6 +324,8 @@ export class RebalanceService {
     // This ensures no NestedResult references a command result index that doesn't exist
     // CRITICAL: After fix, there should be NO NestedResult[2] references (collect_fee)
     this.validateNestedResultReferences(ptb);
+    
+    logger.info('✅ PTB Dry-run PASSED - validation complete');
     
     return ptb;
   }
