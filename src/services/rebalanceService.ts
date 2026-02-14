@@ -37,11 +37,14 @@ export class RebalanceService {
   }
   
   async rebalance(pool: Pool, position: Position): Promise<void> {
+    // Track current stage for error reporting
+    let currentStage = 'rebalance_start';
+    
     // Set Sentry context with pool and position metadata
     setSentryContext({
       poolId: pool.id,
       positionId: position.id,
-      stage: 'rebalance_start',
+      stage: currentStage,
     });
     
     addSentryBreadcrumb('Starting rebalance', 'rebalance', {
@@ -55,11 +58,13 @@ export class RebalanceService {
       logger.info('=== Starting Atomic PTB Rebalance ===');
       
       // Pre-execution validation
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'pre_execution_validation' });
+      currentStage = 'pre_execution_validation';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
       await this.suiClient.checkGasPrice();
       
       // Calculate new range with validated tick spacing
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'calculate_range' });
+      currentStage = 'calculate_range';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
       const newRange = calculateTickRange(
         pool.currentTick,
         this.config.rangeWidthPercent,
@@ -81,7 +86,8 @@ export class RebalanceService {
       }
       
       // Calculate expected amounts with slippage protection
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'calculate_amounts' });
+      currentStage = 'calculate_amounts';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
       // FIXED: Use bigint arithmetic to avoid precision loss
       const expectedAmounts = this.calculateExpectedAmounts(pool, position);
       const slippagePercent = BigInt(Math.floor(this.config.maxSlippagePercent * 100)); // Convert to basis points
@@ -92,7 +98,8 @@ export class RebalanceService {
       logger.info(`Min amounts (${this.config.maxSlippagePercent}% slippage): A=${minAmountA}, B=${minAmountB}`);
       
       // Build single atomic PTB with pre-build validation
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'build_ptb' });
+      currentStage = 'build_ptb';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
       addSentryBreadcrumb('Building PTB', 'rebalance', {
         minAmountA: minAmountA.toString(),
         minAmountB: minAmountB.toString(),
@@ -105,7 +112,8 @@ export class RebalanceService {
       PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
       
       // Execute atomically (single execution)
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: 'execute_ptb' });
+      currentStage = 'execute_ptb';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
       addSentryBreadcrumb('Executing PTB', 'rebalance', {
         poolId: pool.id,
         positionId: position.id,
@@ -161,10 +169,11 @@ export class RebalanceService {
       
       logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       
-      // Capture error in Sentry with pool and position context
+      // Capture error in Sentry with pool, position, and current stage context
       captureException(error, {
         poolId: pool.id,
         positionId: position.id,
+        stage: currentStage,
       });
       
       // Re-throw the error - don't suppress it

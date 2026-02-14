@@ -15,15 +15,27 @@ export function initSentry(): void {
     return;
   }
   
+  // Parse and validate trace sample rate
+  let tracesSampleRate = 0.1; // Default value
+  if (process.env.SENTRY_TRACES_SAMPLE_RATE) {
+    const parsed = parseFloat(process.env.SENTRY_TRACES_SAMPLE_RATE);
+    if (isNaN(parsed) || parsed < 0 || parsed > 1) {
+      logger.warn(
+        `Invalid SENTRY_TRACES_SAMPLE_RATE: ${process.env.SENTRY_TRACES_SAMPLE_RATE}. ` +
+        `Must be between 0 and 1. Using default: ${tracesSampleRate}`
+      );
+    } else {
+      tracesSampleRate = parsed;
+    }
+  }
+  
   Sentry.init({
     dsn: sentryDsn,
     environment: process.env.NODE_ENV || 'production',
     
     // Set tracesSampleRate to capture performance data
     // In production, you might want to lower this to reduce overhead
-    tracesSampleRate: process.env.SENTRY_TRACES_SAMPLE_RATE 
-      ? parseFloat(process.env.SENTRY_TRACES_SAMPLE_RATE) 
-      : 0.1,
+    tracesSampleRate,
     
     // Set release if available (useful for tracking which version had errors)
     release: process.env.npm_package_version,
