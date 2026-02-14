@@ -159,6 +159,8 @@ export class CetusService {
       logger.info(`Found ${positionIds.length} position(s) in wallet, checking for pool ${this.config.poolId}...`);
       
       // Fetch all position data in parallel for performance
+      // Note: Most wallets have only a few positions, making parallel fetching reasonable
+      // If rate limiting becomes an issue, consider batching with p-limit or similar
       const positionDataPromises = positionIds.map(async (positionId) => {
         try {
           const positionData = await this.sdk.Position.getPositionById(positionId);
@@ -184,9 +186,17 @@ export class CetusService {
           continue;
         }
         
-        // Check if position has liquidity (compare string directly or parse to number)
-        if (positionData.liquidity === '0') {
-          logger.debug(`Position ${positionId} has no liquidity, skipping`);
+        // Check if position has liquidity
+        // The liquidity field from the SDK is a string representing a u128 integer
+        // We need to check if it's greater than 0
+        try {
+          const liquidityValue = BigInt(positionData.liquidity);
+          if (liquidityValue <= 0n) {
+            logger.debug(`Position ${positionId} has no liquidity, skipping`);
+            continue;
+          }
+        } catch (error) {
+          logger.warn(`Invalid liquidity value for position ${positionId}: ${positionData.liquidity}`);
           continue;
         }
         
