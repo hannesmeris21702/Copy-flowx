@@ -361,17 +361,17 @@ export class RebalanceService {
     // Note: Since we capture coins from close_position, they should always be valid
     // The swappedCoinA and swappedCoinB come from either:
     // 1. Direct use of close_position outputs if no swap needed
-    // 2. Swap outputs that merge with close_position outputs
-    // Therefore, the fallback code below should not be needed in normal operation
+    // 2. Swap outputs that use close_position outputs as inputs
+    // If either coin is missing, it indicates a bug in either close_position capture or swap logic
     let finalCoinA = swappedCoinA;
     let finalCoinB = swappedCoinB;
     
     if (!swappedCoinA || !swappedCoinB) {
       // This should not happen under normal operation since close_position
-      // always returns coins. Log as error if we hit this.
+      // always returns valid coins. If we hit this, there's a bug.
       throw new Error(
-        `Missing coin after swap: swappedCoinA=${!!swappedCoinA}, swappedCoinB=${!!swappedCoinB}. ` +
-        'This indicates a bug in the swap logic.'
+        `Missing coin before add_liquidity: coinA=${!!swappedCoinA}, coinB=${!!swappedCoinB}. ` +
+        'This indicates a bug in close_position output capture or swap logic.'
       );
     }
     
