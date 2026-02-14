@@ -25,6 +25,7 @@ export class RebalanceService {
   private cetusService: CetusService;
   private config: BotConfig;
   private stateManager: StateManager;
+  currentPositionId?: string;
   
   constructor(
     suiClient: SuiClientService,
