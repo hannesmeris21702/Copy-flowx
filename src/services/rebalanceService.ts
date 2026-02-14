@@ -91,22 +91,24 @@ export class RebalanceService {
       const explained = explainError(error as Error);
       
       if (explained.matched) {
+        const explanation = explained.explanation!;
+        
         logger.error(`\n📋 ERROR TYPE: ${explained.errorType}`);
-        logger.error(`\n📖 EXPLANATION:\n${explained.explanation!.description}`);
+        logger.error(`\n📖 EXPLANATION:\n${explanation.description}`);
         
         logger.error(`\n🔍 POSSIBLE CAUSES:`);
-        explained.explanation!.causes.forEach((cause, idx) => {
+        explanation.causes.forEach((cause, idx) => {
           logger.error(`  ${idx + 1}. ${cause}`);
         });
         
         logger.error(`\n💡 SUGGESTED SOLUTIONS:`);
-        explained.explanation!.fixes.forEach((fix, idx) => {
+        explanation.fixes.forEach((fix, idx) => {
           logger.error(`  ${idx + 1}. ${fix}`);
         });
         
-        if (explained.explanation!.examples && explained.explanation!.examples.length > 0) {
+        if (explanation.examples && explanation.examples.length > 0) {
           logger.error(`\n📝 EXAMPLES:`);
-          explained.explanation!.examples.forEach(example => {
+          explanation.examples.forEach(example => {
             logger.error(`  ${example}`);
           });
         }
