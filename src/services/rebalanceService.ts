@@ -683,19 +683,13 @@ export class RebalanceService {
       logger.info(`Value Difference: ${valueDifferencePercent.toFixed(2)}%`);
       logger.info('=======================================');
       
-      // Validate that currentPositionId is set before adding liquidity
-      if (!this.currentPositionId) {
-        logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        logger.error('❌ CRITICAL ERROR: Position ID not available');
-        logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        logger.error('Cannot add liquidity without a valid position ID.');
-        logger.error('this.currentPositionId is undefined.');
-        logger.error('This should never happen - position must be opened before adding liquidity.');
-        logger.error('');
+      // Enforce explicit position ID variable before adding liquidity
+      const positionIdToUse = this.currentPositionId;
+      
+      // Validate that positionIdToUse is defined
+      if (!positionIdToUse) {
+        logger.error('No active position ID available');
         logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
-        logger.error('Position may remain open without liquidity.');
-        logger.error('Manual intervention required.');
-        logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         
         // Clear state to return to monitoring
         this.stateManager.clearState();
@@ -704,13 +698,13 @@ export class RebalanceService {
       }
       
       logger.info('Adding liquidity to position...');
-      logger.info(`  Position ID: ${this.currentPositionId}`);
+      logger.info(`  Position ID: ${positionIdToUse}`);
       logger.info(`  Using Token A: ${finalAmountA.toString()}`);
       logger.info(`  Using Token B: ${finalAmountB.toString()}`);
       
-      // Add liquidity to the position using this.currentPositionId
+      // Add liquidity to the position using ONLY positionIdToUse (never fallback to env)
       const liquidityResult = await this.addLiquidity(
-        this.currentPositionId,
+        positionIdToUse,
         pool,
         newRange.tickLower,
         newRange.tickUpper,
