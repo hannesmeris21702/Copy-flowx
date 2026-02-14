@@ -147,6 +147,10 @@ export class RebalanceService {
         logger.info('✅ Position closed successfully');
         logger.info('All coins have been returned to your wallet');
         
+        // Invalidate position ID after closing - safeguard against using stale cached ID
+        this.currentPositionId = undefined;
+        logger.info('Invalidated cached position ID after closure');
+        
         // Query wallet balances after close_position confirmation
         currentStage = 'query_balances';
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
@@ -408,6 +412,11 @@ export class RebalanceService {
       } else {
         currentStage = 'open_position';
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        
+        // Explicitly invalidate position ID before opening new position
+        this.currentPositionId = undefined;
+        logger.info('Invalidated position ID before opening new position');
+        
         logger.info('Opening new position...');
         
         const openResult = await this.openPosition(
