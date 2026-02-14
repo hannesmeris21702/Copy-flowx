@@ -523,16 +523,22 @@ export class RebalanceService {
         if (walletA < requiredA) {
           // Need more A, swap B -> A
           const shortfallA = requiredA - walletA;
-          const swapAmountB = BigInt(Math.ceil(Number(shortfallA) * currentPrice));
+          // Convert price to bigint ratio for precise calculation
+          // swapAmountB = shortfallA * price, where price is in terms of B per A
+          // Add 10% buffer to account for slippage and price impact
+          const priceScaled = BigInt(Math.floor(currentPrice * 1000000)); // Scale by 1M for precision
+          const swapAmountB = (shortfallA * priceScaled) / BigInt(1000000);
+          const bufferedSwapB = (swapAmountB * BigInt(110)) / BigInt(100); // 10% buffer
           
           logger.info(`⚠️  Insufficient Token A: need ${requiredA.toString()}, have ${walletA.toString()}`);
-          logger.info(`Swapping ${swapAmountB.toString()} of Token B -> A`);
+          logger.info(`Shortfall: ${shortfallA.toString()}`);
+          logger.info(`Swapping ${bufferedSwapB.toString()} of Token B -> A (with 10% buffer)`);
           
           // Execute swap B -> A
           await this.executeSwap(
             pool,
             false, // swapFromA = false means B -> A
-            swapAmountB,
+            bufferedSwapB,
             this.config.maxSlippagePercent
           );
           
@@ -544,16 +550,22 @@ export class RebalanceService {
         } else if (walletB < requiredB) {
           // Need more B, swap A -> B
           const shortfallB = requiredB - walletB;
-          const swapAmountA = BigInt(Math.ceil(Number(shortfallB) / currentPrice));
+          // Convert 1/price to bigint ratio for precise calculation
+          // swapAmountA = shortfallB / price
+          // Add 10% buffer to account for slippage and price impact
+          const inversePriceScaled = BigInt(Math.floor((1 / currentPrice) * 1000000)); // Scale by 1M
+          const swapAmountA = (shortfallB * inversePriceScaled) / BigInt(1000000);
+          const bufferedSwapA = (swapAmountA * BigInt(110)) / BigInt(100); // 10% buffer
           
           logger.info(`⚠️  Insufficient Token B: need ${requiredB.toString()}, have ${walletB.toString()}`);
-          logger.info(`Swapping ${swapAmountA.toString()} of Token A -> B`);
+          logger.info(`Shortfall: ${shortfallB.toString()}`);
+          logger.info(`Swapping ${bufferedSwapA.toString()} of Token A -> B (with 10% buffer)`);
           
           // Execute swap A -> B
           await this.executeSwap(
             pool,
             true, // swapFromA = true means A -> B
-            swapAmountA,
+            bufferedSwapA,
             this.config.maxSlippagePercent
           );
           

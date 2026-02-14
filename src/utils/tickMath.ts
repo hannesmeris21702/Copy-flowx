@@ -595,7 +595,6 @@ export enum PricePosition {
 
 /**
  * Determine price position relative to the tick range
- * 
  * @param currentSqrtPrice Current sqrt price of the pool
  * @param tickLower Lower tick of the position
  * @param tickUpper Upper tick of the position
@@ -623,7 +622,6 @@ export function determinePricePosition(
 /**
  * Get required token amounts for a target liquidity value using CLMM math
  * This function correctly handles all three price positions (BELOW, INSIDE, ABOVE)
- * 
  * @param targetLiquidityValue Target value in terms of token B
  * @param currentSqrtPrice Current sqrt price of the pool
  * @param tickLower Lower tick of the position
