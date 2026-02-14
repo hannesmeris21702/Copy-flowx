@@ -308,34 +308,24 @@ export class RebalanceService {
     // - Only reference NestedResult[x,0] if it exists
     //
     // In PTB, moveCall results are transaction arguments, not runtime values.
-    // We attempt to extract the position NFT using array destructuring.
-    // If the destructuring succeeds, we have a valid NestedResult reference.
-    // If not, we skip add_liquidity and transferObjects to allow transaction to complete normally.
+    // Array destructuring of a missing element produces undefined, not an error.
+    // We check if the destructured value is defined before using it.
     let newPosition: TransactionObjectArgument | undefined;
-    let canProceedWithPosition = false;
     
-    try {
-      // Attempt to extract the first result (Position NFT) using array destructuring
-      // This creates a NestedResult[x,0] reference
-      [newPosition] = openPositionResult;
-      
-      // If destructuring succeeds, we have a valid reference
-      if (newPosition !== undefined && newPosition !== null) {
-        canProceedWithPosition = true;
-        logger.info('  ✓ Successfully extracted newPosition NFT from openPositionResult[0]');
-      } else {
-        logger.warn('  ⚠ open_position result[0] is undefined/null, skipping position-dependent operations');
-      }
-    } catch (error) {
-      // If destructuring fails, result doesn't have at least 1 element
-      logger.warn('  ⚠ open_position did not return at least 1 object, skipping add_liquidity and transfer');
-      logger.debug(`  Destructuring error: ${error}`);
-      canProceedWithPosition = false;
+    // Attempt to extract the first result (Position NFT) using array destructuring
+    // This creates a NestedResult[x,0] reference if the result exists
+    // If the result doesn't exist, newPosition will be undefined
+    [newPosition] = openPositionResult;
+    
+    if (newPosition !== undefined) {
+      logger.info('  ✓ Successfully extracted newPosition NFT from openPositionResult[0]');
+    } else {
+      logger.warn('  ⚠ open_position result[0] is undefined, skipping position-dependent operations');
     }
     
     // Only add liquidity and transfer if position NFT exists and is valid
     // This allows the transaction to complete normally even if no position NFT is returned
-    if (canProceedWithPosition && newPosition) {
+    if (newPosition) {
       // Step 6: Add liquidity to new position
       // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
       logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
