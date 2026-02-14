@@ -169,4 +169,33 @@ export class SuiClientService {
     
     logger.debug(`Gas price check passed: ${gasPrice}`);
   }
+  
+  /**
+   * Get wallet balance for a specific coin type
+   * @param coinType The coin type to query (e.g., "0x2::sui::SUI")
+   * @returns The total balance for the coin type
+   */
+  async getWalletBalance(coinType: string): Promise<bigint> {
+    try {
+      return await withRetry(
+        async () => {
+          const address = this.getAddress();
+          const balance = await this.client.getBalance({
+            owner: address,
+            coinType: coinType,
+          });
+          
+          logger.debug(`Balance for ${coinType}: ${balance.totalBalance}`);
+          return BigInt(balance.totalBalance);
+        },
+        this.config.maxRetries,
+        this.config.minRetryDelayMs,
+        this.config.maxRetryDelayMs,
+        'Get wallet balance'
+      );
+    } catch (error) {
+      logger.error(`Failed to get wallet balance for ${coinType}`, error);
+      throw error;
+    }
+  }
 }

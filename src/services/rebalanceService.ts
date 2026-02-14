@@ -67,6 +67,28 @@ export class RebalanceService {
       logger.info('✅ Position closed successfully');
       logger.info('All coins have been returned to your wallet');
       
+      // Query wallet balances after close_position confirmation
+      currentStage = 'query_balances';
+      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+      logger.info('Querying wallet balances...');
+      
+      const availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+      const availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+      
+      logger.info('=== Wallet Balances (Available Liquidity) ===');
+      logger.info(`Token A (${pool.coinTypeA}):`);
+      logger.info(`  Available: ${availableA}`);
+      logger.info(`Token B (${pool.coinTypeB}):`);
+      logger.info(`  Available: ${availableB}`);
+      logger.info('These balances are the ONLY liquidity source for new position');
+      logger.info('============================================');
+      
+      addSentryBreadcrumb('Wallet balances queried', 'rebalance', {
+        positionId: position.id,
+        availableA: availableA.toString(),
+        availableB: availableB.toString(),
+      });
+      
       addSentryBreadcrumb('Position closed successfully', 'rebalance', {
         positionId: position.id,
       });
