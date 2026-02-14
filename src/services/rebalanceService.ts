@@ -390,9 +390,9 @@ export class RebalanceService {
     const tickLowerU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickLower)));
     const tickUpperU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickUpper)));
     
-    // FIXED: open_position returns a SINGLE Position NFT object (not a tuple)
+    // NOTE: open_position returns a SINGLE Position NFT object (not a tuple)
     // Per Cetus pool_script Move contract: public fun open_position(...): Position
-    // NOTE: This is a public function (not entry), so it returns a value
+    // This is a public function (not entry), so it returns a value
     // Do NOT use array destructuring or access [0] - it causes SecondaryIndexOutOfBounds error
     // The moveCall result itself IS the Position NFT
     const newPosition = ptb.moveCall({
