@@ -583,3 +583,96 @@ export function applySafetyBuffers(
     usableTokenB,
   };
 }
+
+/**
+ * Price position relative to tick range
+ */
+export enum PricePosition {
+  BELOW = 'BELOW',
+  INSIDE = 'INSIDE',
+  ABOVE = 'ABOVE',
+}
+
+/**
+ * Determine price position relative to the tick range
+ * @param currentSqrtPrice Current sqrt price of the pool
+ * @param tickLower Lower tick of the position
+ * @param tickUpper Upper tick of the position
+ * @returns Price position (BELOW, INSIDE, or ABOVE)
+ */
+export function determinePricePosition(
+  currentSqrtPrice: bigint,
+  tickLower: number,
+  tickUpper: number
+): PricePosition {
+  const sqrtPriceLower = tickToSqrtPrice(tickLower);
+  const sqrtPriceUpper = tickToSqrtPrice(tickUpper);
+  
+  if (currentSqrtPrice < sqrtPriceLower) {
+    return PricePosition.BELOW;
+  }
+  
+  if (currentSqrtPrice > sqrtPriceUpper) {
+    return PricePosition.ABOVE;
+  }
+  
+  return PricePosition.INSIDE;
+}
+
+/**
+ * Get required token amounts for a target liquidity value using CLMM math
+ * This function correctly handles all three price positions (BELOW, INSIDE, ABOVE)
+ * @param targetLiquidityValue Target value in terms of token B
+ * @param currentSqrtPrice Current sqrt price of the pool
+ * @param tickLower Lower tick of the position
+ * @param tickUpper Upper tick of the position
+ * @returns Required amounts of token A and B based on CLMM formulas
+ */
+export function getAmountsForLiquidity(
+  targetLiquidityValue: number,
+  currentSqrtPrice: bigint,
+  tickLower: number,
+  tickUpper: number
+): { requiredA: bigint; requiredB: bigint; pricePosition: PricePosition } {
+  const pricePosition = determinePricePosition(currentSqrtPrice, tickLower, tickUpper);
+  const price = sqrtPriceToPrice(currentSqrtPrice);
+  
+  if (pricePosition === PricePosition.BELOW) {
+    // Price below range: only token A needed
+    // All value goes into token A
+    const requiredA = targetLiquidityValue / price;
+    return {
+      requiredA: BigInt(Math.floor(requiredA)),
+      requiredB: BigInt(0),
+      pricePosition,
+    };
+  }
+  
+  if (pricePosition === PricePosition.ABOVE) {
+    // Price above range: only token B needed
+    // All value stays as token B
+    return {
+      requiredA: BigInt(0),
+      requiredB: BigInt(Math.floor(targetLiquidityValue)),
+      pricePosition,
+    };
+  }
+  
+  // Price INSIDE range: both tokens needed in CLMM ratio
+  // Use optimal ratio calculation
+  const optimalRatio = calculateOptimalRatio(currentSqrtPrice, tickLower, tickUpper);
+  
+  // Solve for amounts: value = amountA * price + amountB
+  // With constraint: amountA / amountB = optimalRatio
+  // So: amountA = optimalRatio * amountB
+  // Substituting: value = optimalRatio * amountB * price + amountB
+  // Solving for amountB: amountB = value / (optimalRatio * price + 1)
+  const requiredB = targetLiquidityValue / (optimalRatio * price + 1);
+  const requiredA = optimalRatio * requiredB;
+  
+  return {
+    requiredA: BigInt(Math.floor(requiredA)),
+    requiredB: BigInt(Math.floor(requiredB)),
+    pricePosition,
+  };
+}
