@@ -391,7 +391,8 @@ export class RebalanceService {
     const tickUpperU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickUpper)));
     
     // FIXED: open_position returns a SINGLE Position NFT object (not a tuple)
-    // Per Cetus pool_script Move contract: public entry fun open_position(...) returns Position NFT
+    // Per Cetus pool_script Move contract: public fun open_position(...): Position
+    // NOTE: This is a public function (not entry), so it returns a value
     // Do NOT use array destructuring or access [0] - it causes SecondaryIndexOutOfBounds error
     // The moveCall result itself IS the Position NFT
     const newPosition = ptb.moveCall({
@@ -464,6 +465,10 @@ export class RebalanceService {
     logger.info('  ✓ Liquidity added, coins consumed');
     
     // Step 7: Transfer new position NFT to sender
+    // NOTE: Direct transferObjects is safe here because:
+    // 1. newPosition is a PTB reference (always valid during construction)
+    // 2. If open_position fails, the entire PTB reverts atomically
+    // 3. Sui PTB framework validates all object references during execution
     logger.info('Step 7: Transfer newPosition NFT to sender');
     ptb.transferObjects([newPosition], ptb.pure.address(this.suiClient.getAddress()));
     logger.info('  ✓ Position transferred');
