@@ -25,6 +25,7 @@ export class RebalanceService {
   private cetusService: CetusService;
   private config: BotConfig;
   private stateManager: StateManager;
+  currentPositionId?: string;
   
   constructor(
     suiClient: SuiClientService,
@@ -145,6 +146,10 @@ export class RebalanceService {
         
         logger.info('✅ Position closed successfully');
         logger.info('All coins have been returned to your wallet');
+        
+        // Invalidate position ID after closing - safeguard against using stale cached ID
+        this.currentPositionId = undefined;
+        logger.info('Invalidated cached position ID after closure');
         
         // Query wallet balances after close_position confirmation
         currentStage = 'query_balances';
@@ -400,9 +405,18 @@ export class RebalanceService {
         if (!newPositionId) {
           throw new Error('State indicates position opened but newPositionId not found in state data');
         }
+        
+        // Set currentPositionId when resuming from state
+        this.currentPositionId = newPositionId;
+        logger.info(`Using runtime position ID from saved state: ${this.currentPositionId}`);
       } else {
         currentStage = 'open_position';
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        
+        // Explicitly invalidate position ID before opening new position
+        this.currentPositionId = undefined;
+        logger.info('Invalidated position ID before opening new position');
+        
         logger.info('Opening new position...');
         
         const openResult = await this.openPosition(
@@ -412,6 +426,10 @@ export class RebalanceService {
         );
         
         newPositionId = openResult.positionId;
+        
+        // Assign and log the new runtime position ID
+        this.currentPositionId = openResult.positionId;
+        logger.info(`Using new runtime position ID: ${this.currentPositionId}`);
         
         // Structured log for position opening
         logOpenPosition({
@@ -674,13 +692,28 @@ export class RebalanceService {
       logger.info(`Value Difference: ${valueDifferencePercent.toFixed(2)}%`);
       logger.info('=======================================');
       
+      // Enforce explicit position ID variable before adding liquidity
+      const positionIdToUse = this.currentPositionId;
+      
+      // Validate that positionIdToUse is defined
+      if (!positionIdToUse) {
+        logger.error('No active position ID available');
+        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+        
+        // Clear state to return to monitoring
+        this.stateManager.clearState();
+        
+        return;
+      }
+      
       logger.info('Adding liquidity to position...');
+      logger.info(`  Position ID: ${positionIdToUse}`);
       logger.info(`  Using Token A: ${finalAmountA.toString()}`);
       logger.info(`  Using Token B: ${finalAmountB.toString()}`);
       
-      // Add liquidity to the position
+      // Add liquidity to the position using ONLY positionIdToUse (never fallback to env)
       const liquidityResult = await this.addLiquidity(
-        newPositionId,
+        positionIdToUse,
         pool,
         newRange.tickLower,
         newRange.tickUpper,
