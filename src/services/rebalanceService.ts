@@ -9,6 +9,7 @@ import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
 import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
 import { PTBValidator } from '../utils/ptbValidator';
+import { PTBPreExecutionValidator } from '../utils/ptbPreExecutionValidator';
 import { safeMergeCoins, safeTransferObjects, safeUseNestedResult, safeUseNestedResultOptional } from '../utils/ptbHelpers';
 import {
   calculateTickRange,
@@ -110,6 +111,16 @@ export class RebalanceService {
       
       // Log PTB structure for debugging (helps with SecondaryIndexOutOfBounds)
       PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
+      
+      // CRITICAL: Pre-execution validation before submitting PTB
+      // Validates:
+      // 1. All NestedResult references point to valid commands
+      // 2. open_position return is handled safely
+      // 3. add_liquidity coin inputs exist
+      // Throws descriptive errors early if validation fails
+      logger.info('Running pre-execution PTB validation...');
+      PTBPreExecutionValidator.validateBeforeExecution(ptb);
+      logger.info('✅ Pre-execution validation passed - PTB is safe to execute');
       
       // Execute atomically (single execution)
       currentStage = 'execute_ptb';
