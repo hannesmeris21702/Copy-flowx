@@ -262,7 +262,7 @@ export class RebalanceService {
     const tickLowerU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickLower)));
     const tickUpperU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickUpper)));
     
-    const newPosition = ptb.moveCall({
+    const [newPosition] = ptb.moveCall({
       target: `${packageId}::pool_script::open_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
