@@ -134,10 +134,17 @@ export class RebalanceService {
     const globalConfigId = sdk.sdkOptions.clmm_pool.config!.global_config_id;
     
     // Normalize type arguments to prevent parsing errors
-    const [normalizedCoinTypeA, normalizedCoinTypeB] = normalizeTypeArguments([
+    const normalizedTypeArgs = normalizeTypeArguments([
       pool.coinTypeA,
       pool.coinTypeB
     ]);
+    const normalizedCoinTypeA = normalizedTypeArgs[0];
+    const normalizedCoinTypeB = normalizedTypeArgs[1];
+    
+    if (!normalizedCoinTypeA || !normalizedCoinTypeB) {
+      throw new Error('Type argument normalization failed: missing normalized types');
+    }
+    
     logger.debug(`Type args normalized: A=${normalizedCoinTypeA}, B=${normalizedCoinTypeB}`);
     
     // Validate that type arguments are properly normalized
