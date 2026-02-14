@@ -488,10 +488,11 @@ export class RebalanceService {
       });
       
       // Swap was performed: reference the NestedResult output and merge
+      // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinA) into coinA');
-      ptb.mergeCoins(coinA, [swappedCoinA]);
+      PTBValidator.conditionalMerge(ptb, coinA, [swappedCoinA], 'swap output swappedCoinA');
       logger.debug('  Merging swap remainder (remainderCoinB) into coinB');
-      ptb.mergeCoins(coinB, [remainderCoinB]);
+      PTBValidator.conditionalMerge(ptb, coinB, [remainderCoinB], 'swap remainder remainderCoinB');
       logger.info('  ✓ Swapped: coinB to coinA, output and remainder merged into stable coins');
       
       return { coinA, coinB };
@@ -529,10 +530,11 @@ export class RebalanceService {
       });
       
       // Swap was performed: reference the NestedResult output and merge
+      // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinB) into coinB');
-      ptb.mergeCoins(coinB, [swappedCoinB]);
+      PTBValidator.conditionalMerge(ptb, coinB, [swappedCoinB], 'swap output swappedCoinB');
       logger.debug('  Merging swap remainder (remainderCoinA) into coinA');
-      ptb.mergeCoins(coinA, [remainderCoinA]);
+      PTBValidator.conditionalMerge(ptb, coinA, [remainderCoinA], 'swap remainder remainderCoinA');
       logger.info('  ✓ Swapped: coinA to coinB, output and remainder merged into stable coins');
       
       return { coinA, coinB };
