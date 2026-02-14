@@ -710,31 +710,47 @@ export class RebalanceService {
       logger.info('Fetching latest pool state before adding liquidity...');
       
       // Fetch the latest pool state from Cetus SDK
-      const latestPool = await this.cetusService.getSDK().Pool.getPool(pool.id);
-      if (!latestPool) {
-        logger.error('Failed to fetch latest pool state');
+      let latestPool;
+      try {
+        latestPool = await this.cetusService.getSDK().Pool.getPool(pool.id);
+      } catch (error) {
+        logger.error('Failed to fetch latest pool state', error);
         logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
         this.stateManager.clearState();
         return;
       }
       
-      // Get the position from the pool using the NFT ID
-      const positionsHandle = latestPool.position_manager.positions_handle;
-      logger.info(`Fetching positions from pool (handle: ${positionsHandle})...`);
+      if (!latestPool) {
+        logger.error('Failed to fetch latest pool state: Pool not found');
+        logger.error(`  Pool ID: ${pool.id}`);
+        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+        this.stateManager.clearState();
+        return;
+      }
       
-      // Fetch all positions from the pool
-      const positionsData = await this.cetusService.getSDK().Pool.getPositionList(positionsHandle);
+      // Get the position from the pool using the NFT ID directly
+      logger.info(`Fetching position by ID: ${positionIdToUse}...`);
       
-      // Find the position matching our NFT ID
-      const poolPosition = positionsData.data.find(
-        (pos: SDKPosition) => pos.pos_object_id === positionIdToUse
-      );
+      let poolPosition: SDKPosition;
+      try {
+        poolPosition = await this.cetusService.getSDK().Position.getPositionById(
+          positionIdToUse,
+          false, // don't calculate rewarder
+          false  // don't show display
+        );
+      } catch (error) {
+        logger.error('Position not found in pool state', error);
+        logger.error(`  Searched for NFT ID: ${positionIdToUse}`);
+        logger.error(`  Pool ID: ${pool.id}`);
+        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+        this.stateManager.clearState();
+        return;
+      }
       
       if (!poolPosition) {
         logger.error('Position not found in pool state');
         logger.error(`  Searched for NFT ID: ${positionIdToUse}`);
-        logger.error(`  Positions handle: ${positionsHandle}`);
-        logger.error(`  Total positions in pool: ${positionsData.data.length}`);
+        logger.error(`  Pool ID: ${pool.id}`);
         logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
         this.stateManager.clearState();
         return;
