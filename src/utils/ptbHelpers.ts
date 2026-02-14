@@ -336,7 +336,6 @@ export function safeUseNestedResult<T = TransactionObjectArgument>(
     // For Sui SDK results, direct indexing creates proper NestedResult references
     // We should ALWAYS use the indexed access, not fall back to the whole result
     const element = (result as IndexableResult)[index];
-    
     // Only throw if explicitly checking for out-of-bounds after confirming element doesn't exist
     // For Sui SDK, element will be a Proxy/NestedResult object, never undefined for valid indices
     if (element === undefined) {
