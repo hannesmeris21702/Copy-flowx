@@ -1,10 +1,11 @@
 import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
-import { BotConfig, Pool, Position } from '../types';
+import { BotConfig, Pool, Position, RebalanceState } from '../types';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
 import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount, calculateLiquidityAmounts } from '../utils/tickMath';
+import { StateManager } from '../utils/stateManager';
 
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
@@ -14,6 +15,7 @@ export class RebalanceService {
   private suiClient: SuiClientService;
   private cetusService: CetusService;
   private config: BotConfig;
+  private stateManager: StateManager;
   
   constructor(
     suiClient: SuiClientService,
@@ -23,11 +25,34 @@ export class RebalanceService {
     this.suiClient = suiClient;
     this.cetusService = cetusService;
     this.config = config;
+    this.stateManager = new StateManager(config.stateFilePath);
   }
   
   async rebalance(pool: Pool, position: Position): Promise<void> {
     // Track current stage for error reporting
     let currentStage = 'rebalance_start';
+    
+    // Load existing state (if any) for resume capability
+    const existingState = this.stateManager.loadState();
+    let resumeState: RebalanceState = RebalanceState.MONITORING;
+    let stateData: any = {};
+    
+    if (existingState) {
+      // Validate that we're resuming the same position
+      if (existingState.positionId !== position.id || existingState.poolId !== pool.id) {
+        logger.warn('State file exists but for different position/pool - starting fresh');
+        logger.warn(`  State: ${existingState.positionId} vs Current: ${position.id}`);
+        this.stateManager.clearState();
+      } else {
+        resumeState = existingState.state;
+        stateData = existingState.data || {};
+        logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        logger.info('🔄 RESUMING FROM SAVED STATE');
+        logger.info(`   Current State: ${resumeState}`);
+        logger.info(`   Saved at: ${existingState.timestamp}`);
+        logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      }
+    }
     
     // Set Sentry context with pool and position metadata
     setSentryContext({
@@ -41,6 +66,7 @@ export class RebalanceService {
       positionId: position.id,
       currentTick: pool.currentTick,
       positionRange: `[${position.tickLower}, ${position.tickUpper}]`,
+      resumeState: resumeState,
     });
     
     try {
@@ -56,65 +82,103 @@ export class RebalanceService {
       logger.info(`Position range: [${position.tickLower}, ${position.tickUpper}]`);
       logger.info(`Position liquidity: ${position.liquidity}`);
       
-      // Close position - remove 100% liquidity, collect all fees, close NFT
-      currentStage = 'close_position';
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-      logger.info('Closing position...');
-      logger.info('  - Removing 100% liquidity');
-      logger.info('  - Collecting all fees');
-      logger.info('  - Closing position NFT');
-      logger.info('  - Returning all coins to wallet');
-      
-      await this.closePosition(pool, position);
-      
-      logger.info('✅ Position closed successfully');
-      logger.info('All coins have been returned to your wallet');
-      
-      // Query wallet balances after close_position confirmation
-      currentStage = 'query_balances';
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-      logger.info('Querying wallet balances...');
-      
-      let availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
-      let availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
-      
-      logger.info('=== Wallet Balances (Available Liquidity) ===');
-      logger.info(`Token A (${pool.coinTypeA}):`);
-      logger.info(`  Available: ${availableA}`);
-      logger.info(`Token B (${pool.coinTypeB}):`);
-      logger.info(`  Available: ${availableB}`);
-      logger.info('These balances are the ONLY liquidity source for new position');
-      logger.info('============================================');
-      
-      // Calculate value using pool price data
-      currentStage = 'calculate_value';
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-      logger.info('Calculating total value using pool price data...');
-      
+      // Variables to track throughout rebalance
+      let availableA: bigint;
+      let availableB: bigint;
+      let totalValue: number;
+      let newRange: { tickLower: number; tickUpper: number };
+      let newPositionId: string;
       const sqrtPrice = BigInt(pool.currentSqrtPrice);
-      const { valueA, valueB, totalValue } = calculateQuoteValue(
-        availableA,
-        availableB,
-        sqrtPrice
-      );
       
-      logger.info('=== Portfolio Value (in terms of Token B) ===');
-      logger.info(`Value of Token A: ${valueA.toFixed(6)}`);
-      logger.info(`Value of Token B: ${valueB.toFixed(6)}`);
-      logger.info(`Total Value: ${totalValue.toFixed(6)}`);
-      logger.info('This totalValue MUST be preserved when opening new position');
-      logger.info('=============================================');
+      // Close position - remove 100% liquidity, collect all fees, close NFT
+      // Skip if already completed (state >= POSITION_CLOSED)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.POSITION_CLOSED)) {
+        logger.info('⏭️  SKIPPING: Position already closed (resuming from saved state)');
+        
+        // Restore data from saved state
+        availableA = BigInt(stateData.availableA || '0');
+        availableB = BigInt(stateData.availableB || '0');
+        totalValue = parseFloat(stateData.totalValue || '0');
+        
+        logger.info(`   Restored availableA: ${availableA}`);
+        logger.info(`   Restored availableB: ${availableB}`);
+        logger.info(`   Restored totalValue: ${totalValue}`);
+      } else {
+        currentStage = 'close_position';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Closing position...');
+        logger.info('  - Removing 100% liquidity');
+        logger.info('  - Collecting all fees');
+        logger.info('  - Closing position NFT');
+        logger.info('  - Returning all coins to wallet');
+        
+        await this.closePosition(pool, position);
+        
+        logger.info('✅ Position closed successfully');
+        logger.info('All coins have been returned to your wallet');
+        
+        // Query wallet balances after close_position confirmation
+        currentStage = 'query_balances';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Querying wallet balances...');
+        
+        availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+        availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+        
+        logger.info('=== Wallet Balances (Available Liquidity) ===');
+        logger.info(`Token A (${pool.coinTypeA}):`);
+        logger.info(`  Available: ${availableA}`);
+        logger.info(`Token B (${pool.coinTypeB}):`);
+        logger.info(`  Available: ${availableB}`);
+        logger.info('These balances are the ONLY liquidity source for new position');
+        logger.info('============================================');
+        
+        // Calculate value using pool price data
+        currentStage = 'calculate_value';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Calculating total value using pool price data...');
+        
+        const { valueA, valueB, totalValue: calcTotalValue } = calculateQuoteValue(
+          availableA,
+          availableB,
+          sqrtPrice
+        );
+        
+        totalValue = calcTotalValue;
+        
+        logger.info('=== Portfolio Value (in terms of Token B) ===');
+        logger.info(`Value of Token A: ${valueA.toFixed(6)}`);
+        logger.info(`Value of Token B: ${valueB.toFixed(6)}`);
+        logger.info(`Total Value: ${totalValue.toFixed(6)}`);
+        logger.info('This totalValue MUST be preserved when opening new position');
+        logger.info('=============================================');
+        
+        // Save state: POSITION_CLOSED
+        this.stateManager.saveState({
+          state: RebalanceState.POSITION_CLOSED,
+          positionId: position.id,
+          poolId: pool.id,
+          timestamp: new Date().toISOString(),
+          data: {
+            availableA: availableA.toString(),
+            availableB: availableB.toString(),
+            totalValue: totalValue.toString(),
+          },
+        });
+      }
       
       // Calculate new range for potential position reopening
       currentStage = 'calculate_new_range';
       setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
       logger.info('Calculating new position range...');
       
-      const newRange = calculateTickRange(
-        pool.currentTick,
-        this.config.rangeWidthPercent,
-        pool.tickSpacing
-      );
+      newRange = stateData.tickLower && stateData.tickUpper 
+        ? { tickLower: stateData.tickLower, tickUpper: stateData.tickUpper }
+        : calculateTickRange(
+            pool.currentTick,
+            this.config.rangeWidthPercent,
+            pool.tickSpacing
+          );
       
       logger.info(`New range calculated: [${newRange.tickLower}, ${newRange.tickUpper}]`);
       
@@ -142,7 +206,19 @@ export class RebalanceService {
       logger.info('=================================');
       
       // Execute swap if required
-      if (swapCheck.swapRequired) {
+      // Skip if already completed (state >= SWAP_COMPLETED)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.SWAP_COMPLETED)) {
+        logger.info('⏭️  SKIPPING: Swap already completed (resuming from saved state)');
+        
+        // Restore data from saved state  
+        if (stateData.swapExecuted) {
+          availableA = BigInt(stateData.availableA || '0');
+          availableB = BigInt(stateData.availableB || '0');
+          
+          logger.info(`   Restored availableA: ${availableA}`);
+          logger.info(`   Restored availableB: ${availableB}`);
+        }
+      } else if (swapCheck.swapRequired) {
         currentStage = 'execute_swap';
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
         logger.info('Swap is required - executing swap...');
@@ -214,34 +290,113 @@ export class RebalanceService {
           newAvailableB: availableB.toString(),
           newTotalValue: newTotalValue.toString(),
         });
+        
+        // Save state: SWAP_COMPLETED
+        this.stateManager.saveState({
+          state: RebalanceState.SWAP_COMPLETED,
+          positionId: position.id,
+          poolId: pool.id,
+          timestamp: new Date().toISOString(),
+          data: {
+            availableA: availableA.toString(),
+            availableB: availableB.toString(),
+            totalValue: totalValue.toString(),
+            tickLower: newRange.tickLower,
+            tickUpper: newRange.tickUpper,
+            swapExecuted: true,
+          },
+        });
       } else {
         logger.info('No swap required - token ratio is acceptable');
+        
+        // Save state: SWAP_COMPLETED (even though no swap was done)
+        this.stateManager.saveState({
+          state: RebalanceState.SWAP_COMPLETED,
+          positionId: position.id,
+          poolId: pool.id,
+          timestamp: new Date().toISOString(),
+          data: {
+            availableA: availableA.toString(),
+            availableB: availableB.toString(),
+            totalValue: totalValue.toString(),
+            tickLower: newRange.tickLower,
+            tickUpper: newRange.tickUpper,
+            swapExecuted: false,
+          },
+        });
       }
       
       // Open new position
-      currentStage = 'open_position';
-      setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-      logger.info('Opening new position...');
-      
-      const newPositionId = await this.openPosition(
-        pool,
-        newRange.tickLower,
-        newRange.tickUpper
-      );
-      
-      logger.info('=== New Position Created ===');
-      logger.info(`Position ID: ${newPositionId}`);
-      logger.info(`Tick range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
-      logger.info('============================');
-      
-      addSentryBreadcrumb('New position opened', 'rebalance', {
-        oldPositionId: position.id,
-        newPositionId: newPositionId,
-        tickLower: newRange.tickLower,
-        tickUpper: newRange.tickUpper,
-      });
+      // Skip if already completed (state >= POSITION_OPENED)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.POSITION_OPENED)) {
+        logger.info('⏭️  SKIPPING: Position already opened (resuming from saved state)');
+        
+        // Restore data from saved state
+        newPositionId = stateData.newPositionId || '';
+        
+        logger.info(`   Restored newPositionId: ${newPositionId}`);
+        
+        if (!newPositionId) {
+          throw new Error('State indicates position opened but newPositionId not found in state data');
+        }
+      } else {
+        currentStage = 'open_position';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Opening new position...');
+        
+        newPositionId = await this.openPosition(
+          pool,
+          newRange.tickLower,
+          newRange.tickUpper
+        );
+        
+        logger.info('=== New Position Created ===');
+        logger.info(`Position ID: ${newPositionId}`);
+        logger.info(`Tick range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+        logger.info('============================');
+        
+        addSentryBreadcrumb('New position opened', 'rebalance', {
+          oldPositionId: position.id,
+          newPositionId: newPositionId,
+          tickLower: newRange.tickLower,
+          tickUpper: newRange.tickUpper,
+        });
+        
+        // Save state: POSITION_OPENED
+        this.stateManager.saveState({
+          state: RebalanceState.POSITION_OPENED,
+          positionId: position.id,
+          poolId: pool.id,
+          timestamp: new Date().toISOString(),
+          data: {
+            availableA: availableA.toString(),
+            availableB: availableB.toString(),
+            totalValue: totalValue.toString(),
+            tickLower: newRange.tickLower,
+            tickUpper: newRange.tickUpper,
+            newPositionId: newPositionId,
+            swapExecuted: stateData.swapExecuted || false,
+          },
+        });
+      }
       
       // Add liquidity to the new position
+      // Skip if already completed (state >= LIQUIDITY_ADDED)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.LIQUIDITY_ADDED)) {
+        logger.info('⏭️  SKIPPING: Liquidity already added (resuming from saved state)');
+        logger.info('   Rebalance was already completed - clearing state');
+        
+        // Clear state and return
+        this.stateManager.clearState();
+        
+        logger.info('=== Rebalance Already Complete ===');
+        logger.info(`Old Position: ${position.id} (CLOSED)`);
+        logger.info(`New Position: ${newPositionId} (OPENED with liquidity)`);
+        logger.info('===================================');
+        
+        return;
+      }
+      
       currentStage = 'add_liquidity';
       setSentryContext({ poolId: pool.id, positionId: newPositionId, stage: currentStage });
       
@@ -264,6 +419,8 @@ export class RebalanceService {
       await this.addLiquidity(
         newPositionId,
         pool,
+        newRange.tickLower,
+        newRange.tickUpper,
         liquidityAmounts.amountA,
         liquidityAmounts.amountB,
         this.config.maxSlippagePercent
@@ -315,15 +472,6 @@ export class RebalanceService {
         valuePreserved: valuePreserved,
       });
       
-      addSentryBreadcrumb('Wallet balances queried', 'rebalance', {
-        positionId: position.id,
-        availableA: availableA.toString(),
-        availableB: availableB.toString(),
-        valueA: valueA.toString(),
-        valueB: valueB.toString(),
-        totalValue: totalValue.toString(),
-      });
-      
       addSentryBreadcrumb('Swap requirement checked', 'rebalance', {
         positionId: position.id,
         swapRequired: swapCheck.swapRequired,
@@ -342,6 +490,21 @@ export class RebalanceService {
       logger.info(`Old Position: ${position.id} (CLOSED)`);
       logger.info(`New Position: ${newPositionId} (OPENED with liquidity)`);
       logger.info('===========================');
+      
+      // Save state: LIQUIDITY_ADDED (final state before clearing)
+      this.stateManager.saveState({
+        state: RebalanceState.LIQUIDITY_ADDED,
+        positionId: position.id,
+        poolId: pool.id,
+        timestamp: new Date().toISOString(),
+        data: {
+          newPositionId: newPositionId,
+          valuePreserved: valuePreserved,
+        },
+      });
+      
+      // Clear state - rebalance complete, return to MONITORING
+      this.stateManager.clearState();
 
       
     } catch (error) {
@@ -555,6 +718,8 @@ export class RebalanceService {
    * 
    * @param positionId The position NFT ID
    * @param pool The pool information
+   * @param tickLower Lower tick of the position range
+   * @param tickUpper Upper tick of the position range
    * @param amountA Amount of token A to add
    * @param amountB Amount of token B to add
    * @param slippagePercent Slippage tolerance percentage
@@ -562,6 +727,8 @@ export class RebalanceService {
   private async addLiquidity(
     positionId: string,
     pool: Pool,
+    tickLower: number,
+    tickUpper: number,
     amountA: bigint,
     amountB: bigint,
     slippagePercent: number
@@ -574,20 +741,20 @@ export class RebalanceService {
     logger.info(`  Amount B: ${amountB.toString()}`);
     logger.info(`  Slippage: ${slippagePercent}%`);
     
-    // Convert slippage from percentage (e.g., 1.0 for 1%) to basis points (100 bps)
-    const slippageBps = Math.floor(slippagePercent * 100);
-    
     // Build the add liquidity transaction using Cetus SDK
-    // fix_amount_a=true means we use the specified amount_a and let amount_b adjust
-    const tx = await sdk.Position.addLiquidityTransactionPayload({
-      position_id: positionId,
+    // The SDK requires delta_liquidity and max amounts (not fixed amounts)
+    // For now, we'll use the amounts as max values and let SDK calculate liquidity
+    const tx = await sdk.Position.createAddLiquidityPayload({
       coinTypeA: pool.coinTypeA,
       coinTypeB: pool.coinTypeB,
-      amount_a: amountA.toString(),
-      amount_b: amountB.toString(),
-      fix_amount_a: true,  // Fix amount A, allow B to adjust within slippage
-      slippage_tolerance_bps: slippageBps,
-      is_open: true,  // true for newly opened positions, false for existing positions
+      pool_id: pool.id,
+      pos_id: positionId,
+      delta_liquidity: '0', // SDK will calculate based on max amounts
+      max_amount_a: amountA.toString(),
+      max_amount_b: amountB.toString(),
+      tick_lower: tickLower,
+      tick_upper: tickUpper,
+      collect_fee: false, // Don't collect fees when adding to newly opened position
       rewarder_coin_types: [],  // No rewarders for now
     });
     

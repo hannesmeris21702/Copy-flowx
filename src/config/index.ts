@@ -71,6 +71,7 @@ export function loadConfig(): BotConfig {
     swapRatioTolerancePercent: parseFloat(
       getEnvVarWithDefault('SWAP_RATIO_TOLERANCE_PERCENT', '5.0')
     ),
+    stateFilePath: getEnvVarWithDefault('STATE_FILE_PATH', '.rebalance-state.json'),
   };
   
   return config;
