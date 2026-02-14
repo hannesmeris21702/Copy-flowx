@@ -714,7 +714,7 @@ export class RebalanceService {
       try {
         latestPool = await this.cetusService.getSDK().Pool.getPool(pool.id);
       } catch (error) {
-        logger.error('Failed to fetch latest pool state', error);
+        logger.error(`Failed to fetch latest pool state for pool ${pool.id}`, error);
         logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
         this.stateManager.clearState();
         return;
@@ -739,8 +739,8 @@ export class RebalanceService {
           false  // don't show display
         );
       } catch (error) {
-        logger.error('Position not found in pool state', error);
-        logger.error(`  Searched for NFT ID: ${positionIdToUse}`);
+        logger.error('Failed to fetch position from SDK', error);
+        logger.error(`  Position ID: ${positionIdToUse}`);
         logger.error(`  Pool ID: ${pool.id}`);
         logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
         this.stateManager.clearState();
