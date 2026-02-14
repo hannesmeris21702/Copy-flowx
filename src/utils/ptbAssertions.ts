@@ -24,10 +24,10 @@ export class PTBAssertionError extends Error {
  */
 
 /**
- * Asserts that a nested index is valid for accessing MoveCall results.
+ * Validates that a nested index is valid for accessing MoveCall results.
  * Use this before destructuring or accessing specific outputs from a MoveCall.
  * 
- * Note: This validates the index value, not the actual result structure,
+ * Note: This validates the index value is non-negative, not the actual result structure,
  * as result structure can only be verified at runtime during execution.
  * 
  * @param nestedIndex - The index to access (e.g., 0 for first result, 1 for second)
@@ -43,11 +43,11 @@ export class PTBAssertionError extends Error {
  * });
  * 
  * // Validate the index before accessing openPositionResult[0]
- * assertNestedResultExists(0, 4, `${packageId}::pool_script::open_position`);
+ * validateNestedIndex(0, 4, `${packageId}::pool_script::open_position`);
  * const [newPosition] = openPositionResult;
  * ```
  */
-export function assertNestedResultExists(
+export function validateNestedIndex(
   nestedIndex: number,
   commandIndex: number,
   moveCallTarget: string
@@ -65,9 +65,14 @@ export function assertNestedResultExists(
   }
   
   logger.debug(
-    `✓ Asserting NestedResult[${commandIndex}][${nestedIndex}] exists for MoveCall: ${moveCallTarget}`
+    `✓ Nested index ${nestedIndex} is valid for command ${commandIndex} (${moveCallTarget})`
   );
 }
+
+/**
+ * @deprecated Use validateNestedIndex instead. This alias is provided for backwards compatibility.
+ */
+export const assertNestedResultExists = validateNestedIndex;
 
 /**
  * Validates that a MoveCall result is safe to reference (non-empty).
@@ -98,10 +103,6 @@ export function assertMoveCallWillReturnResults(
   moveCallTarget: string
 ): void {
   if (!willReturnResults) {
-    logger.warn(
-      `⚠ MoveCall at command ${commandIndex} (${moveCallTarget}) may return zero results. ` +
-      `Avoid creating NestedResult references to its outputs.`
-    );
     throw new PTBAssertionError(
       `MoveCall at command ${commandIndex} (${moveCallTarget}) will not return results. ` +
       `Cannot safely create NestedResult references. Consider calling for side effects only.`,
@@ -174,16 +175,21 @@ export function validateCommandResult(
   commandIndex: number,
   moveCallTarget: string
 ): void {
+  // Only perform validation if expectedCount is specified
+  if (expectedCount === undefined) {
+    logger.debug(`No validation constraint for command ${commandIndex} result (${moveCallTarget})`);
+    return;
+  }
+  
   logger.debug(
-    `Validating command ${commandIndex} result (${moveCallTarget})` +
-    (expectedCount !== undefined ? ` - expecting ${expectedCount} result(s)` : '')
+    `Validating command ${commandIndex} result (${moveCallTarget}) - expecting ${expectedCount} result(s)`
   );
   
   // Note: At PTB build time, we can't inspect the actual result count
   // This validation primarily serves as documentation and runtime context
   // The real validation happens during dry-run or execution
   
-  if (expectedCount !== undefined && expectedCount < 1) {
+  if (expectedCount < 1) {
     throw new PTBAssertionError(
       `Invalid expected count ${expectedCount} for command ${commandIndex} (${moveCallTarget}). ` +
       `Expected count must be >= 1. If the MoveCall returns no results, don't capture or reference its output.`,
@@ -192,7 +198,7 @@ export function validateCommandResult(
     );
   }
   
-  logger.debug(`✓ Command ${commandIndex} result validated (${moveCallTarget})`);
+  logger.debug(`✓ Command ${commandIndex} expected result count validated (${moveCallTarget})`);
 }
 
 /**
@@ -286,7 +292,7 @@ export function safeDestructure(
   
   // Validate each nested index
   for (let i = 0; i < count; i++) {
-    assertNestedResultExists(i, commandIndex, moveCallTarget);
+    validateNestedIndex(i, commandIndex, moveCallTarget);
   }
   
   // Perform destructuring
