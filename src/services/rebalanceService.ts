@@ -6,6 +6,15 @@ import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
 import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount, calculateLiquidityAmounts } from '../utils/tickMath';
 import { StateManager } from '../utils/stateManager';
+import { 
+  logOutOfRangeDetection, 
+  logPositionClosed, 
+  logWalletBalances, 
+  logSwap, 
+  logOpenPosition, 
+  logAddLiquidity,
+  SwapDirection
+} from '../utils/botLogger';
 
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
@@ -73,6 +82,15 @@ export class RebalanceService {
       logger.info('=== Starting Position Closure ===');
       logger.info('Position is OUT_OF_RANGE - closing position and returning all funds to wallet');
       
+      // Structured log for out-of-range detection
+      logOutOfRangeDetection({
+        currentTick: pool.currentTick,
+        tickLower: position.tickLower,
+        tickUpper: position.tickUpper,
+        positionId: position.id,
+        liquidity: position.liquidity.toString(),
+      });
+      
       // Pre-execution validation
       currentStage = 'pre_execution_validation';
       setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
@@ -112,7 +130,15 @@ export class RebalanceService {
         logger.info('  - Closing position NFT');
         logger.info('  - Returning all coins to wallet');
         
-        await this.closePosition(pool, position);
+        const closeResult = await this.closePosition(pool, position);
+        
+        // Structured log for position closure
+        logPositionClosed({
+          positionId: position.id,
+          poolId: pool.id,
+          success: true,
+          transactionDigest: closeResult?.digest,
+        });
         
         logger.info('✅ Position closed successfully');
         logger.info('All coins have been returned to your wallet');
@@ -124,6 +150,19 @@ export class RebalanceService {
         
         availableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
         availableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+        
+        // Structured log for wallet balances
+        logWalletBalances({
+          tokenA: {
+            type: pool.coinTypeA,
+            balance: availableA.toString(),
+          },
+          tokenB: {
+            type: pool.coinTypeB,
+            balance: availableB.toString(),
+          },
+          context: 'After position close',
+        });
         
         logger.info('=== Wallet Balances (Available Liquidity) ===');
         logger.info(`Token A (${pool.coinTypeA}):`);
@@ -244,12 +283,23 @@ export class RebalanceService {
         logger.info('====================');
         
         // Execute swap
-        await this.executeSwap(
+        const swapResult = await this.executeSwap(
           pool,
           swapDetails.swapFromA,
           swapDetails.swapAmount,
           this.config.maxSlippagePercent
         );
+        
+        // Structured log for swap execution (reuse currentPrice from above)
+        logSwap({
+          direction: swapDetails.swapFromA ? SwapDirection.A_TO_B : SwapDirection.B_TO_A,
+          reason: swapCheck.reason,
+          inputAmount: swapDetails.swapAmount.toString(),
+          outputAmount: swapDetails.expectedOutput.toString(),
+          price: currentPrice.toFixed(6),
+          slippage: this.config.maxSlippagePercent.toString(),
+          transactionDigest: swapResult?.digest,
+        });
         
         addSentryBreadcrumb('Swap executed', 'rebalance', {
           positionId: position.id,
@@ -344,11 +394,23 @@ export class RebalanceService {
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
         logger.info('Opening new position...');
         
-        newPositionId = await this.openPosition(
+        const openResult = await this.openPosition(
           pool,
           newRange.tickLower,
           newRange.tickUpper
         );
+        
+        newPositionId = openResult.positionId;
+        
+        // Structured log for position opening
+        logOpenPosition({
+          poolId: pool.id,
+          positionId: newPositionId,
+          tickLower: newRange.tickLower,
+          tickUpper: newRange.tickUpper,
+          success: true,
+          transactionDigest: openResult.digest,
+        });
         
         logger.info('=== New Position Created ===');
         logger.info(`Position ID: ${newPositionId}`);
@@ -416,7 +478,7 @@ export class RebalanceService {
       logger.info(`  Using Token B: ${liquidityAmounts.amountB.toString()}`);
       
       // Add liquidity to the position
-      await this.addLiquidity(
+      const liquidityResult = await this.addLiquidity(
         newPositionId,
         pool,
         newRange.tickLower,
@@ -425,6 +487,15 @@ export class RebalanceService {
         liquidityAmounts.amountB,
         this.config.maxSlippagePercent
       );
+      
+      // Structured log for liquidity addition
+      logAddLiquidity({
+        positionId: newPositionId,
+        amountA: liquidityAmounts.amountA.toString(),
+        amountB: liquidityAmounts.amountB.toString(),
+        success: true,
+        transactionDigest: liquidityResult?.digest,
+      });
       
       // Refresh balances to show what's left (dust)
       const dustA = await this.suiClient.getWalletBalance(pool.coinTypeA);
@@ -567,7 +638,7 @@ export class RebalanceService {
   private async closePosition(
     pool: Pool,
     position: Position
-  ): Promise<void> {
+  ): Promise<{ digest?: string }> {
     const sdk = this.cetusService.getSDK();
     
     // Build the close position transaction using Cetus SDK
@@ -585,7 +656,8 @@ export class RebalanceService {
     
     // Execute the transaction and wait for confirmation
     // Coins are automatically returned to wallet (no return value capture)
-    await this.suiClient.executeSDKPayload(tx);
+    const result = await this.suiClient.executeSDKPayload(tx);
+    return { digest: result.digest };
   }
   
   /**
@@ -597,7 +669,7 @@ export class RebalanceService {
     swapFromA: boolean,
     swapAmount: bigint,
     slippagePercent: number
-  ): Promise<void> {
+  ): Promise<{ digest?: string }> {
     const sdk = this.cetusService.getSDK();
     
     logger.info('Executing swap...');
@@ -624,21 +696,22 @@ export class RebalanceService {
     });
     
     // Execute the transaction and wait for confirmation
-    await this.suiClient.executeSDKPayload(tx);
+    const result = await this.suiClient.executeSDKPayload(tx);
     
     logger.info('✅ Swap executed successfully');
+    return { digest: result.digest };
   }
   
   /**
    * Open a new position using Cetus SDK
    * Creates position NFT without adding liquidity
-   * @returns The position ID (NFT object ID)
+   * @returns Object with position ID and transaction digest
    */
   private async openPosition(
     pool: Pool,
     tickLower: number,
     tickUpper: number
-  ): Promise<string> {
+  ): Promise<{ positionId: string; digest?: string }> {
     const sdk = this.cetusService.getSDK();
     
     logger.info('Opening new position...');
@@ -669,7 +742,7 @@ export class RebalanceService {
     logger.info('✅ Position opened successfully');
     logger.info(`  Position ID: ${positionId}`);
     
-    return positionId;
+    return { positionId, digest: result.digest };
   }
   
   /**
@@ -723,6 +796,7 @@ export class RebalanceService {
    * @param amountA Amount of token A to add
    * @param amountB Amount of token B to add
    * @param slippagePercent Slippage tolerance percentage
+   * @returns Object with transaction digest
    */
   private async addLiquidity(
     positionId: string,
@@ -732,7 +806,7 @@ export class RebalanceService {
     amountA: bigint,
     amountB: bigint,
     slippagePercent: number
-  ): Promise<void> {
+  ): Promise<{ digest?: string }> {
     const sdk = this.cetusService.getSDK();
     
     logger.info('Adding liquidity to position...');
@@ -759,8 +833,9 @@ export class RebalanceService {
     });
     
     // Execute the transaction and wait for confirmation
-    await this.suiClient.executeSDKPayload(tx);
+    const result = await this.suiClient.executeSDKPayload(tx);
     
     logger.info('✅ Liquidity added successfully');
+    return { digest: result.digest };
   }
 }
