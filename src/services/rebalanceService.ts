@@ -277,9 +277,34 @@ export class RebalanceService {
     });
     logger.info('  ✓ Captured: newPosition NFT');
     
+    // ============================================================================
+    // Step 5.5: Validate coins before add_liquidity_by_fix_coin
+    // Ensure both coinA and coinB exist; use zero coin split as fallback
+    // This prevents add_liquidity_by_fix_coin from receiving invalid coin objects
+    // ============================================================================
+    logger.info('Step 5.5: Validate coins for add_liquidity');
+    
+    // Validate swappedCoinA - if missing or invalid, use zero coin split as fallback
+    let finalCoinA = swappedCoinA;
+    if (!swappedCoinA) {
+      logger.warn('  ⚠ swappedCoinA is missing, using zeroCoin split as fallback');
+      const [fallbackCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);
+      finalCoinA = fallbackCoinA;
+    }
+    
+    // Validate swappedCoinB - if missing or invalid, use zero coin split as fallback
+    let finalCoinB = swappedCoinB;
+    if (!swappedCoinB) {
+      logger.warn('  ⚠ swappedCoinB is missing, using zeroCoin split as fallback');
+      const [fallbackCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);
+      finalCoinB = fallbackCoinB;
+    }
+    
+    logger.info('  ✓ Both coins validated: finalCoinA and finalCoinB ready');
+    
     // Step 6: Add liquidity to new position
     // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-    logger.info('Step 6: Add liquidity → consumes swappedCoinA, swappedCoinB');
+    logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
@@ -288,8 +313,8 @@ export class RebalanceService {
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         newPosition,
-        swappedCoinA,
-        swappedCoinB,
+        finalCoinA,
+        finalCoinB,
         ptb.pure.u64(minAmountA.toString()),
         ptb.pure.u64(minAmountB.toString()),
         ptb.pure.bool(true), // fix_amount_a
