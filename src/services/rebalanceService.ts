@@ -327,8 +327,8 @@ export class RebalanceService {
     
     logger.info('  ✓ Both coins validated: finalCoinA and finalCoinB ready');
     
-    // SAFETY CHECK: Before calling ptb.transferObjects, verify position NFT exists
-    // Only proceed with add_liquidity and transfer if we have a valid position reference
+    // SAFETY CHECK: Use safeTransfer helper for position NFT transfer
+    // The helper checks if position NFT exists before calling transferObjects
     // Per requirements: if no position NFT, skip transferObjects and allow transaction to complete normally
     if (newPosition) {
       // Step 6: Add liquidity to new position
@@ -352,10 +352,10 @@ export class RebalanceService {
       });
       logger.info('  ✓ Liquidity added, coins consumed');
       
-      // Step 7: Transfer new position NFT to sender
-      // Only call transferObjects if position NFT reference was successfully extracted
+      // Step 7: Transfer new position NFT to sender using safeTransfer helper
+      // safeTransfer validates that openPositionResult[0] exists before transferring
       logger.info('Step 7: Transfer newPosition NFT to sender');
-      ptb.transferObjects([newPosition], ptb.pure.address(this.suiClient.getAddress()));
+      this.safeTransfer(ptb, openPositionResult, ptb.pure.address(this.suiClient.getAddress()));
       logger.info('  ✓ Position transferred');
     } else {
       // Per requirements: If no position NFT is returned, skip transferObjects
@@ -518,6 +518,29 @@ export class RebalanceService {
   ): void {
     if (source !== undefined && source !== null) {
       ptb.mergeCoins(destination, [source]);
+    }
+  }
+  
+  /**
+   * Safe transfer helper function for transferring objects with validation.
+   * Only calls transferObjects if moveCallResult exists and has at least one element.
+   * 
+   * This prevents errors from attempting to transfer undefined or missing objects,
+   * allowing transactions to complete gracefully even if expected results are not present.
+   * 
+   * @param ptb - The Transaction builder
+   * @param moveCallResult - The result from a moveCall, which may be an array or single value
+   * @param recipient - The recipient address to transfer to
+   */
+  private safeTransfer(
+    ptb: Transaction,
+    moveCallResult: any,
+    recipient: TransactionObjectArgument
+  ): void {
+    // Check if moveCallResult exists and has at least one element
+    // This handles both array results and ensures [0] element exists
+    if (moveCallResult && moveCallResult[0]) {
+      ptb.transferObjects([moveCallResult[0]], recipient);
     }
   }
   
