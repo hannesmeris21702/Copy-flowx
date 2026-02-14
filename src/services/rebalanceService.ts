@@ -4,7 +4,7 @@ import { BotConfig, Pool, Position, RebalanceState } from '../types';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
-import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount, calculateLiquidityAmounts } from '../utils/tickMath';
+import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount, calculateAmountsFromValue, applySafetyBuffers } from '../utils/tickMath';
 import { StateManager } from '../utils/stateManager';
 import { 
   logOutOfRangeDetection, 
@@ -104,6 +104,7 @@ export class RebalanceService {
       let availableA: bigint;
       let availableB: bigint;
       let totalValue: number;
+      let closedPositionValue: number; // Value after close_position
       let newRange: { tickLower: number; tickUpper: number };
       let newPositionId: string;
       const sqrtPrice = BigInt(pool.currentSqrtPrice);
@@ -117,10 +118,12 @@ export class RebalanceService {
         availableA = BigInt(stateData.availableA || '0');
         availableB = BigInt(stateData.availableB || '0');
         totalValue = parseFloat(stateData.totalValue || '0');
+        closedPositionValue = parseFloat(stateData.closedPositionValue || stateData.totalValue || '0');
         
         logger.info(`   Restored availableA: ${availableA}`);
         logger.info(`   Restored availableB: ${availableB}`);
         logger.info(`   Restored totalValue: ${totalValue}`);
+        logger.info(`   Restored closedPositionValue: ${closedPositionValue}`);
       } else {
         currentStage = 'close_position';
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
@@ -184,12 +187,14 @@ export class RebalanceService {
         );
         
         totalValue = calcTotalValue;
+        closedPositionValue = calcTotalValue; // Store value immediately after close
         
         logger.info('=== Portfolio Value (in terms of Token B) ===');
         logger.info(`Value of Token A: ${valueA.toFixed(6)}`);
         logger.info(`Value of Token B: ${valueB.toFixed(6)}`);
         logger.info(`Total Value: ${totalValue.toFixed(6)}`);
-        logger.info('This totalValue MUST be preserved when opening new position');
+        logger.info(`Closed Position Value: ${closedPositionValue.toFixed(6)}`);
+        logger.info('This closedPositionValue will be used as reference for liquidity re-add');
         logger.info('=============================================');
         
         // Save state: POSITION_CLOSED
@@ -202,6 +207,7 @@ export class RebalanceService {
             availableA: availableA.toString(),
             availableB: availableB.toString(),
             totalValue: totalValue.toString(),
+            closedPositionValue: closedPositionValue.toString(),
           },
         });
       }
@@ -257,6 +263,9 @@ export class RebalanceService {
           logger.info(`   Restored availableA: ${availableA}`);
           logger.info(`   Restored availableB: ${availableB}`);
         }
+        
+        // Restore closedPositionValue from state
+        closedPositionValue = parseFloat(stateData.closedPositionValue || '0');
       } else if (swapCheck.swapRequired) {
         currentStage = 'execute_swap';
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
@@ -351,6 +360,7 @@ export class RebalanceService {
             availableA: availableA.toString(),
             availableB: availableB.toString(),
             totalValue: totalValue.toString(),
+            closedPositionValue: closedPositionValue.toString(),
             tickLower: newRange.tickLower,
             tickUpper: newRange.tickUpper,
             swapExecuted: true,
@@ -369,6 +379,7 @@ export class RebalanceService {
             availableA: availableA.toString(),
             availableB: availableB.toString(),
             totalValue: totalValue.toString(),
+            closedPositionValue: closedPositionValue.toString(),
             tickLower: newRange.tickLower,
             tickUpper: newRange.tickUpper,
             swapExecuted: false,
@@ -462,20 +473,89 @@ export class RebalanceService {
       currentStage = 'add_liquidity';
       setSentryContext({ poolId: pool.id, positionId: newPositionId, stage: currentStage });
       
-      // Calculate optimal liquidity amounts
-      // This ensures we don't exceed available balances and leave dust if needed
-      // Use the current availableA and availableB (already updated if swap was executed)
-      const liquidityAmounts = calculateLiquidityAmounts(
+      // =====================================================================
+      // VALUE-BASED LIQUIDITY RE-ADD LOGIC
+      // =====================================================================
+      
+      // Step 1: Calculate current available value
+      logger.info('=== Step 1: Calculate Available Value ===');
+      const { totalValue: availableValue } = calculateQuoteValue(
         availableA,
         availableB,
+        sqrtPrice
+      );
+      logger.info(`Closed Position Value: ${closedPositionValue.toFixed(6)}`);
+      logger.info(`Available Value (after swap): ${availableValue.toFixed(6)}`);
+      
+      // Step 2: Determine target liquidity value
+      logger.info('=== Step 2: Determine Target Liquidity Value ===');
+      const targetLiquidityValue = Math.min(closedPositionValue, availableValue);
+      logger.info(`Target Liquidity Value: ${targetLiquidityValue.toFixed(6)}`);
+      logger.info('=================================================');
+      
+      // Step 3: Convert target value to required amounts for the new tick range
+      logger.info('=== Step 3: Convert Value to Token Amounts ===');
+      const { amountA: amountA_needed, amountB: amountB_needed } = calculateAmountsFromValue(
+        targetLiquidityValue,
         sqrtPrice,
         newRange.tickLower,
         newRange.tickUpper
       );
+      logger.info(`Amount A Needed: ${amountA_needed.toString()}`);
+      logger.info(`Amount B Needed: ${amountB_needed.toString()}`);
+      logger.info('===============================================');
+      
+      // Step 4: Apply safety buffers
+      logger.info('=== Step 4: Apply Safety Buffers ===');
+      const { usableTokenA, usableTokenB } = applySafetyBuffers(availableA, availableB);
+      logger.info(`Available Token A: ${availableA.toString()}`);
+      logger.info(`Usable Token A (98%): ${usableTokenA.toString()}`);
+      logger.info(`Available Token B: ${availableB.toString()}`);
+      logger.info(`Usable Token B (SUI - reserve): ${usableTokenB.toString()}`);
+      logger.info('=====================================');
+      
+      // Step 5: Calculate final amounts (min of needed vs usable)
+      logger.info('=== Step 5: Determine Final Amounts ===');
+      const finalAmountA = amountA_needed < usableTokenA ? amountA_needed : usableTokenA;
+      const finalAmountB = amountB_needed < usableTokenB ? amountB_needed : usableTokenB;
+      logger.info(`Final Amount A: ${finalAmountA.toString()}`);
+      logger.info(`Final Amount B: ${finalAmountB.toString()}`);
+      
+      // Step 6: Check if amounts are valid
+      if (finalAmountA <= BigInt(0) && finalAmountB <= BigInt(0)) {
+        logger.warn('⚠️  WARNING: Both token amounts are zero or negative!');
+        logger.warn('Cannot add liquidity with invalid amounts.');
+        logger.warn('Aborting liquidity addition - position will remain open without liquidity.');
+        logger.warn('Manual intervention may be required.');
+        
+        // Clear state to return to monitoring
+        this.stateManager.clearState();
+        
+        return;
+      }
+      logger.info('========================================');
+      
+      // Step 7: Calculate actual value being added
+      const { totalValue: actualAddedValue } = calculateQuoteValue(
+        finalAmountA,
+        finalAmountB,
+        sqrtPrice
+      );
+      const valueDifferencePercent = closedPositionValue > 0 
+        ? ((actualAddedValue - closedPositionValue) / closedPositionValue) * 100 
+        : 0;
+      
+      // Step 8: Log comprehensive value tracking
+      logger.info('=== VALUE-BASED LIQUIDITY SUMMARY ===');
+      logger.info(`Closed Position Value: ${closedPositionValue.toFixed(6)}`);
+      logger.info(`Target Liquidity Value: ${targetLiquidityValue.toFixed(6)}`);
+      logger.info(`Actual Added Value: ${actualAddedValue.toFixed(6)}`);
+      logger.info(`Value Difference: ${valueDifferencePercent.toFixed(2)}%`);
+      logger.info('======================================');
       
       logger.info('Adding liquidity to position...');
-      logger.info(`  Using Token A: ${liquidityAmounts.amountA.toString()}`);
-      logger.info(`  Using Token B: ${liquidityAmounts.amountB.toString()}`);
+      logger.info(`  Using Token A: ${finalAmountA.toString()}`);
+      logger.info(`  Using Token B: ${finalAmountB.toString()}`);
       
       // Add liquidity to the position
       const liquidityResult = await this.addLiquidity(
@@ -483,16 +563,16 @@ export class RebalanceService {
         pool,
         newRange.tickLower,
         newRange.tickUpper,
-        liquidityAmounts.amountA,
-        liquidityAmounts.amountB,
+        finalAmountA,
+        finalAmountB,
         this.config.maxSlippagePercent
       );
       
       // Structured log for liquidity addition
       logAddLiquidity({
         positionId: newPositionId,
-        amountA: liquidityAmounts.amountA.toString(),
-        amountB: liquidityAmounts.amountB.toString(),
+        amountA: finalAmountA.toString(),
+        amountB: finalAmountB.toString(),
         success: true,
         transactionDigest: liquidityResult?.digest,
       });
@@ -508,8 +588,8 @@ export class RebalanceService {
       
       // Calculate final portfolio value to verify preservation
       const { totalValue: liquidityTotalValue } = calculateQuoteValue(
-        liquidityAmounts.amountA,
-        liquidityAmounts.amountB,
+        finalAmountA,
+        finalAmountB,
         sqrtPrice
       );
       
@@ -525,21 +605,21 @@ export class RebalanceService {
       logger.info(`Value in Position: ${liquidityTotalValue.toFixed(6)}`);
       logger.info(`Value in Wallet (dust): ${dustTotalValue.toFixed(6)}`);
       logger.info(`Total Value: ${finalTotalValue.toFixed(6)}`);
-      logger.info(`Original Total Value: ${totalValue.toFixed(6)}`);
+      logger.info(`Original Closed Position Value: ${closedPositionValue.toFixed(6)}`);
       
       // Check if value is preserved (within 1% tolerance to account for slippage and rounding)
-      const valuePreserved = Math.abs(finalTotalValue - totalValue) < 0.01 * totalValue;
+      const valuePreserved = Math.abs(finalTotalValue - closedPositionValue) < 0.01 * closedPositionValue;
       logger.info(`Value Preserved: ${valuePreserved ? 'YES' : 'NO (within 1% tolerance)'}`);
       logger.info('==============================');
       
       addSentryBreadcrumb('Liquidity added to position', 'rebalance', {
         positionId: newPositionId,
-        amountA: liquidityAmounts.amountA.toString(),
-        amountB: liquidityAmounts.amountB.toString(),
+        amountA: finalAmountA.toString(),
+        amountB: finalAmountB.toString(),
         dustA: dustA.toString(),
         dustB: dustB.toString(),
         finalTotalValue: finalTotalValue.toString(),
-        originalTotalValue: totalValue.toString(),
+        closedPositionValue: closedPositionValue.toString(),
         valuePreserved: valuePreserved,
       });
       

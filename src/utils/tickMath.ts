@@ -501,3 +501,85 @@ export function calculateLiquidityAmounts(
     amountB: availableB,
   };
 }
+
+/**
+ * Convert a target value (in terms of token B) to required amounts of token A and B
+ * for a specific tick range at current price
+ * 
+ * @param targetValue Target value in terms of token B
+ * @param currentSqrtPrice Current sqrt price of the pool
+ * @param tickLower Lower tick of the position
+ * @param tickUpper Upper tick of the position
+ * @returns Required amounts of token A and B
+ */
+export function calculateAmountsFromValue(
+  targetValue: number,
+  currentSqrtPrice: bigint,
+  tickLower: number,
+  tickUpper: number
+): { amountA: bigint; amountB: bigint } {
+  const sqrtPriceLower = tickToSqrtPrice(tickLower);
+  const sqrtPriceUpper = tickToSqrtPrice(tickUpper);
+  
+  // If price is below range, only token A is needed
+  if (currentSqrtPrice < sqrtPriceLower) {
+    // Convert value to token A using current price
+    const price = sqrtPriceToPrice(currentSqrtPrice);
+    const amountA = targetValue / price;
+    return {
+      amountA: BigInt(Math.floor(amountA)),
+      amountB: BigInt(0),
+    };
+  }
+  
+  // If price is above range, only token B is needed
+  if (currentSqrtPrice > sqrtPriceUpper) {
+    return {
+      amountA: BigInt(0),
+      amountB: BigInt(Math.floor(targetValue)),
+    };
+  }
+  
+  // Price is in range, need both tokens in specific ratio
+  const optimalRatio = calculateOptimalRatio(currentSqrtPrice, tickLower, tickUpper);
+  const price = sqrtPriceToPrice(currentSqrtPrice);
+  
+  // Solve for amounts: value = amountA * price + amountB
+  // With constraint: amountA / amountB = optimalRatio
+  // So: amountA = optimalRatio * amountB
+  // Substituting: value = optimalRatio * amountB * price + amountB
+  // Solving for amountB: amountB = value / (optimalRatio * price + 1)
+  const amountB = targetValue / (optimalRatio * price + 1);
+  const amountA = optimalRatio * amountB;
+  
+  return {
+    amountA: BigInt(Math.floor(amountA)),
+    amountB: BigInt(Math.floor(amountB)),
+  };
+}
+
+/**
+ * Apply safety buffers to wallet balances
+ * 
+ * @param tokenA Available token A in wallet
+ * @param tokenB Available token B (SUI) in wallet
+ * @returns Usable amounts after applying safety buffers
+ */
+export function applySafetyBuffers(
+  tokenA: bigint,
+  tokenB: bigint
+): { usableTokenA: bigint; usableTokenB: bigint } {
+  // Token A: 98% of available
+  const usableTokenA = (tokenA * BigInt(98)) / BigInt(100);
+  
+  // Token B (SUI): subtract max(2% of balance, 100_000_000 MIST = 0.1 SUI)
+  const twoPercent = (tokenB * BigInt(2)) / BigInt(100);
+  const minReserve = BigInt(100_000_000); // 0.1 SUI in MIST
+  const reserve = twoPercent > minReserve ? twoPercent : minReserve;
+  const usableTokenB = tokenB > reserve ? tokenB - reserve : BigInt(0);
+  
+  return {
+    usableTokenA,
+    usableTokenB,
+  };
+}
