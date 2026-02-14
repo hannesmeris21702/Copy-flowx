@@ -6,6 +6,7 @@ import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
 import { PTBValidator } from '../utils/ptbValidator';
+import { safeMergeCoins, safeTransferObjects, safeUseNestedResult, safeUseNestedResultOptional } from '../utils/ptbHelpers';
 import {
   calculateTickRange,
   tickToSqrtPrice,
@@ -240,8 +241,16 @@ export class RebalanceService {
     
     // Create stable coins using splitCoins with zero amounts
     // These serve as guaranteed-valid coin references for downstream operations
-    const [stableCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);  // Command 4: Create stable coinA reference
-    const [stableCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);  // Command 5: Create stable coinB reference
+    const stableCoinA = safeUseNestedResult(
+      ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]),
+      0,
+      'stable coinA reference from splitCoins'
+    );  // Command 4: Create stable coinA reference
+    const stableCoinB = safeUseNestedResult(
+      ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]),
+      0,
+      'stable coinB reference from splitCoins'
+    );  // Command 5: Create stable coinB reference
     logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
     logger.info('  ✓ Stable coin references ready for swap operations (NO merge operations)');
     
@@ -295,9 +304,13 @@ export class RebalanceService {
     // If such an edge case occurs, requirements specify: skip transferObjects,
     // allow transaction to complete normally to prevent transaction failure
     //
-    // Extract position NFT using array destructuring to create NestedResult[x,0] reference
+    // Extract position NFT using safe helper to avoid direct indexing
     // If the result doesn't contain a position at index 0, newPosition will be undefined
-    const [newPosition] = openPositionResult;
+    const newPosition = safeUseNestedResultOptional(
+      openPositionResult,
+      0,
+      'position NFT from open_position'
+    );
     
     // Verify extraction succeeded
     if (newPosition) {
@@ -320,7 +333,11 @@ export class RebalanceService {
     let finalCoinA = swappedCoinA;
     if (!swappedCoinA) {
       logger.warn('  ⚠ swappedCoinA is missing, using zeroCoin split as fallback');
-      const [fallbackCoinA] = ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]);
+      const fallbackCoinA = safeUseNestedResult(
+        ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]),
+        0,
+        'fallback coinA from splitCoins'
+      );
       finalCoinA = fallbackCoinA;
     }
     
@@ -328,7 +345,11 @@ export class RebalanceService {
     let finalCoinB = swappedCoinB;
     if (!swappedCoinB) {
       logger.warn('  ⚠ swappedCoinB is missing, using zeroCoin split as fallback');
-      const [fallbackCoinB] = ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]);
+      const fallbackCoinB = safeUseNestedResult(
+        ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]),
+        0,
+        'fallback coinB from splitCoins'
+      );
       finalCoinB = fallbackCoinB;
     }
     
@@ -359,10 +380,15 @@ export class RebalanceService {
       });
       logger.info('  ✓ Liquidity added, coins consumed');
       
-      // Step 7: Transfer new position NFT to sender using safeTransfer helper
-      // safeTransfer checks moveCallResult && moveCallResult[0] before transferring
+      // Step 7: Transfer new position NFT to sender using safe helper
+      // safeTransferObjects checks if object exists before transferring
       logger.info('Step 7: Transfer newPosition NFT to sender');
-      this.safeTransfer(ptb, openPositionResult, ptb.pure.address(this.suiClient.getAddress()));
+      safeTransferObjects(
+        ptb,
+        openPositionResult,
+        ptb.pure.address(this.suiClient.getAddress()),
+        { description: 'position NFT to sender' }
+      );
       logger.info('  ✓ Position transferred');
     } else {
       // Per requirements: If no position NFT is returned, skip transferObjects
@@ -510,48 +536,6 @@ export class RebalanceService {
     logger.info(`✓ ZERO NestedResult[2] references found (collect_fee is side-effects only)`);
   }
   
-  /**
-   * Safe merge helper function for conditional coin merging.
-   * Only merges if the source coin exists (not undefined or null).
-   * 
-   * @param ptb - The Transaction builder
-   * @param destination - The destination coin to merge into
-   * @param source - The source coin to merge from (may be undefined/null)
-   */
-  private safeMerge(
-    ptb: Transaction,
-    destination: TransactionObjectArgument,
-    source: TransactionObjectArgument | undefined | null
-  ): void {
-    if (source !== undefined && source !== null) {
-      ptb.mergeCoins(destination, [source]);
-    }
-  }
-  
-  /**
-   * Safe transfer helper function for transferring objects with validation.
-   * Only calls transferObjects if moveCallResult exists and has at least one element.
-   * 
-   * This prevents errors from attempting to transfer undefined or missing objects,
-   * allowing transactions to complete gracefully even if expected results are not present.
-   * 
-   * Per requirements: checks moveCallResult && moveCallResult[0] before transferring
-   * 
-   * @param ptb - The Transaction builder
-   * @param moveCallResult - The result from a moveCall (can be array-like or single value)
-   * @param recipient - The recipient address to transfer to
-   */
-  private safeTransfer(
-    ptb: Transaction,
-    moveCallResult: TransactionObjectArgument | TransactionObjectArgument[] | any,
-    recipient: TransactionObjectArgument
-  ): void {
-    // Check if moveCallResult exists and has at least one element
-    // Matches specification: if (moveCallResult && moveCallResult[0])
-    if (moveCallResult && moveCallResult[0]) {
-      ptb.transferObjects([moveCallResult[0]], recipient);
-    }
-  }
   
   private addSwapIfNeeded(
     ptb: Transaction,
@@ -594,8 +578,8 @@ export class RebalanceService {
       const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
       
       // Use SDK builder pattern: router::swap
-      // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
-      const [swappedCoinA, remainderCoinB] = ptb.moveCall({
+      // Returns tuple (Coin<A>, Coin<B>) - extract safely without direct indexing
+      const swapResult = ptb.moveCall({
         target: `${packageId}::router::swap`,
         typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
         arguments: [
@@ -612,12 +596,16 @@ export class RebalanceService {
         ],
       });
       
+      // Extract results safely without direct indexing
+      const swappedCoinA = safeUseNestedResult(swapResult, 0, 'swapped coinA from router::swap');
+      const remainderCoinB = safeUseNestedResult(swapResult, 1, 'remainder coinB from router::swap');
+      
       // Swap was performed: reference the NestedResult output and merge
       // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinA) into coinA');
-      this.safeMerge(ptb, coinA, swappedCoinA);
+      safeMergeCoins(ptb, coinA, swappedCoinA, { description: 'swap output into coinA' });
       logger.debug('  Merging swap remainder (remainderCoinB) into coinB');
-      this.safeMerge(ptb, coinB, remainderCoinB);
+      safeMergeCoins(ptb, coinB, remainderCoinB, { description: 'swap remainder into coinB' });
       logger.info('  ✓ Swapped: coinB to coinA, output and remainder merged into stable coins');
       
       return { coinA, coinB };
@@ -636,8 +624,8 @@ export class RebalanceService {
       const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
       
       // Use SDK builder pattern: router::swap
-      // Returns tuple (Coin<A>, Coin<B>) - use array destructuring
-      const [remainderCoinA, swappedCoinB] = ptb.moveCall({
+      // Returns tuple (Coin<A>, Coin<B>) - extract safely without direct indexing
+      const swapResult = ptb.moveCall({
         target: `${packageId}::router::swap`,
         typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
         arguments: [
@@ -654,12 +642,16 @@ export class RebalanceService {
         ],
       });
       
+      // Extract results safely without direct indexing
+      const remainderCoinA = safeUseNestedResult(swapResult, 0, 'remainder coinA from router::swap');
+      const swappedCoinB = safeUseNestedResult(swapResult, 1, 'swapped coinB from router::swap');
+      
       // Swap was performed: reference the NestedResult output and merge
       // Use conditional merge pattern to ensure safe coin handling per Cetus SDK
       logger.debug('  Merging swap output (swappedCoinB) into coinB');
-      this.safeMerge(ptb, coinB, swappedCoinB);
+      safeMergeCoins(ptb, coinB, swappedCoinB, { description: 'swap output into coinB' });
       logger.debug('  Merging swap remainder (remainderCoinA) into coinA');
-      this.safeMerge(ptb, coinA, remainderCoinA);
+      safeMergeCoins(ptb, coinA, remainderCoinA, { description: 'swap remainder into coinA' });
       logger.info('  ✓ Swapped: coinA to coinB, output and remainder merged into stable coins');
       
       return { coinA, coinB };
