@@ -134,23 +134,21 @@ export class PTBPreExecutionValidator {
         }
         
         // Check for references to known side-effect-only commands
-        // Command 2 is typically collect_fee which should not be referenced
-        if (commandIndex === 2) {
-          const cmd = ptbData.commands[2];
-          if (cmd && typeof cmd === 'object' && '$kind' in cmd && cmd.$kind === 'MoveCall') {
-            const moveCallCmd = cmd as any;
-            const target = moveCallCmd.MoveCall?.target;
-            if (target && target.includes('collect_fee')) {
-              errors.push(new PTBPreExecutionError(
-                `Invalid NestedResult reference at ${path}: ` +
-                `references command ${commandIndex} (collect_fee) which should be called for side effects only. ` +
-                `NestedResult: [${commandIndex}, ${resultIndex}]`,
-                commandIndex,
-                'NestedResultInvalid',
-                'Remove references to collect_fee outputs. It should be called for side effects only. ' +
-                'Do not destructure or merge coins from collect_fee results.'
-              ));
-            }
+        // Instead of hardcoding command index, check the actual MoveCall target
+        const referencedCmd = ptbData.commands[commandIndex];
+        if (referencedCmd && typeof referencedCmd === 'object' && '$kind' in referencedCmd && referencedCmd.$kind === 'MoveCall') {
+          const moveCallCmd = referencedCmd as any;
+          const target = moveCallCmd.MoveCall?.target;
+          if (target && target.includes('collect_fee')) {
+            errors.push(new PTBPreExecutionError(
+              `Invalid NestedResult reference at ${path}: ` +
+              `references command ${commandIndex} (collect_fee) which should be called for side effects only. ` +
+              `NestedResult: [${commandIndex}, ${resultIndex}]`,
+              commandIndex,
+              'NestedResultInvalid',
+              'Remove references to collect_fee outputs. It should be called for side effects only. ' +
+              'Do not destructure or merge coins from collect_fee results.'
+            ));
           }
         }
         
@@ -222,25 +220,10 @@ export class PTBPreExecutionValidator {
     
     logger.debug(`    Found open_position at command ${openPositionCommandIndex}`);
     
-    // Check if open_position result is used safely
-    // Look for direct destructuring of open_position result without safety checks
-    
-    // Check all subsequent commands for references to open_position result
-    for (let i = openPositionCommandIndex + 1; i < ptbData.commands.length; i++) {
-      const cmd = ptbData.commands[i];
-      
-      // Check if this command directly references open_position result at index 0
-      // This is unsafe if not wrapped in a conditional or safe helper
-      const hasDirectReference = this.commandReferencesResult(cmd, openPositionCommandIndex, 0);
-      
-      if (hasDirectReference) {
-        // This is potentially unsafe, but we need to verify it's not in a safe wrapper
-        // For now, log it as a potential issue
-        logger.debug(`    ⚠️  Command ${i} references open_position result[${openPositionCommandIndex}][0]`);
-        // Note: In practice, the code uses safeUseNestedResultOptional which is safe
-        // We're being conservative here to catch potential issues
-      }
-    }
+    // The current implementation uses safeUseNestedResultOptional which is safe
+    // The code properly checks if newPosition exists before using it for add_liquidity and transfer
+    // This validation confirms open_position is present; actual safety is ensured by safe helpers
+    logger.debug('    ✓ open_position command found and will be validated by safe extraction helpers');
     
     if (errors.length === 0) {
       logger.debug('    ✓ open_position return handling is safe');
@@ -267,6 +250,11 @@ export class PTBPreExecutionValidator {
     const ptbData = ptb.getData();
     
     logger.debug('  Validating add_liquidity coin inputs...');
+    
+    // Argument positions for add_liquidity_by_fix_coin
+    const COIN_A_ARG_INDEX = 3;
+    const COIN_B_ARG_INDEX = 4;
+    const MIN_ARGS_REQUIRED = 5;
     
     // Find add_liquidity command
     let addLiquidityCommandIndex: number | undefined;
@@ -313,11 +301,22 @@ export class PTBPreExecutionValidator {
       return { passed: false, errors };
     }
     
+    // Check that args has sufficient length
+    if (args.length < MIN_ARGS_REQUIRED) {
+      errors.push(new PTBPreExecutionError(
+        `add_liquidity at command ${addLiquidityCommandIndex} has insufficient arguments (expected at least ${MIN_ARGS_REQUIRED}, got ${args.length})`,
+        addLiquidityCommandIndex,
+        'AddLiquidityMissingCoins',
+        'Ensure add_liquidity is called with all required arguments including coinA and coinB'
+      ));
+      return { passed: false, errors };
+    }
+    
     // Check coinA (arg 3)
-    const coinAArg = args[3];
+    const coinAArg = args[COIN_A_ARG_INDEX];
     if (!coinAArg) {
       errors.push(new PTBPreExecutionError(
-        `add_liquidity at command ${addLiquidityCommandIndex} missing coinA input (argument 3)`,
+        `add_liquidity at command ${addLiquidityCommandIndex} missing coinA input (argument ${COIN_A_ARG_INDEX})`,
         addLiquidityCommandIndex,
         'AddLiquidityMissingCoins',
         'Ensure coinA is provided to add_liquidity. Use zero coin split as fallback if needed.'
@@ -327,10 +326,10 @@ export class PTBPreExecutionValidator {
     }
     
     // Check coinB (arg 4)
-    const coinBArg = args[4];
+    const coinBArg = args[COIN_B_ARG_INDEX];
     if (!coinBArg) {
       errors.push(new PTBPreExecutionError(
-        `add_liquidity at command ${addLiquidityCommandIndex} missing coinB input (argument 4)`,
+        `add_liquidity at command ${addLiquidityCommandIndex} missing coinB input (argument ${COIN_B_ARG_INDEX})`,
         addLiquidityCommandIndex,
         'AddLiquidityMissingCoins',
         'Ensure coinB is provided to add_liquidity. Use zero coin split as fallback if needed.'
@@ -339,30 +338,24 @@ export class PTBPreExecutionValidator {
       logger.debug(`    ✓ CoinB input exists: ${JSON.stringify(coinBArg).substring(0, 50)}...`);
     }
     
-    // Validate that coin inputs reference valid commands (if they are NestedResults)
-    if (coinAArg && typeof coinAArg === 'object' && '$kind' in coinAArg && coinAArg.$kind === 'NestedResult') {
-      const [refCommandIdx] = (coinAArg as any).NestedResult;
-      if (refCommandIdx >= addLiquidityCommandIndex) {
-        errors.push(new PTBPreExecutionError(
-          `add_liquidity coinA at command ${addLiquidityCommandIndex} references future command ${refCommandIdx}`,
-          addLiquidityCommandIndex,
-          'AddLiquidityMissingCoins',
-          'Ensure coin inputs reference commands that come before add_liquidity'
-        ));
+    // Helper to validate coin NestedResult reference
+    const validateCoinNestedResult = (coinArg: any, coinName: string): void => {
+      if (coinArg && typeof coinArg === 'object' && '$kind' in coinArg && coinArg.$kind === 'NestedResult') {
+        const [refCommandIdx] = coinArg.NestedResult;
+        if (addLiquidityCommandIndex !== undefined && refCommandIdx >= addLiquidityCommandIndex) {
+          errors.push(new PTBPreExecutionError(
+            `add_liquidity ${coinName} at command ${addLiquidityCommandIndex} references future command ${refCommandIdx}`,
+            addLiquidityCommandIndex,
+            'AddLiquidityMissingCoins',
+            `Ensure ${coinName} input references commands that come before add_liquidity`
+          ));
+        }
       }
-    }
+    };
     
-    if (coinBArg && typeof coinBArg === 'object' && '$kind' in coinBArg && coinBArg.$kind === 'NestedResult') {
-      const [refCommandIdx] = (coinBArg as any).NestedResult;
-      if (refCommandIdx >= addLiquidityCommandIndex) {
-        errors.push(new PTBPreExecutionError(
-          `add_liquidity coinB at command ${addLiquidityCommandIndex} references future command ${refCommandIdx}`,
-          addLiquidityCommandIndex,
-          'AddLiquidityMissingCoins',
-          'Ensure coin inputs reference commands that come before add_liquidity'
-        ));
-      }
-    }
+    // Validate that coin inputs reference valid commands (if they are NestedResults)
+    validateCoinNestedResult(coinAArg, 'coinA');
+    validateCoinNestedResult(coinBArg, 'coinB');
     
     if (errors.length === 0) {
       logger.debug('    ✓ add_liquidity coin inputs are valid');
