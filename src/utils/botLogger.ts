@@ -1,4 +1,5 @@
 import { logger } from './logger';
+import { isDebugMode, debugLog } from './debugMode';
 
 /**
  * Bot step/stage types for organized logging
@@ -204,19 +205,36 @@ export class BotLogger {
 
   /**
    * Log PTB validation with detailed command structure
+   * In DEBUG_MODE: Prints full command details and data
+   * In production: Prints minimal command summary
    */
   static logPTBValidation(ptbData: PTBData): void {
-    logger.info('=== PTB COMMANDS PRE-BUILD VALIDATION ===');
-    logger.info(`Total commands: ${ptbData.commands.length}`);
-    
-    ptbData.commands.forEach((cmd, idx) => {
-      const cmdType = cmd.$kind || cmd.kind || 'unknown';
-      const cmdStr = JSON.stringify(cmd);
-      const truncatedCmd = cmdStr.length > 300 ? cmdStr.substring(0, 300) + '...' : cmdStr;
-      logger.info(`Command ${idx}: type=${cmdType}, data=${truncatedCmd}`);
-    });
-    
-    logger.info('=== END PTB COMMANDS ===');
+    if (isDebugMode()) {
+      // DEBUG MODE: Full verbose output
+      logger.info('=== PTB COMMANDS PRE-BUILD VALIDATION (DEBUG MODE) ===');
+      logger.info(`Total commands: ${ptbData.commands.length}`);
+      
+      ptbData.commands.forEach((cmd, idx) => {
+        const cmdType = cmd.$kind || cmd.kind || 'unknown';
+        
+        // Full command data in debug mode
+        logger.info(`\nCommand ${idx}: type=${cmdType}`);
+        debugLog(() => {
+          const cmdStr = JSON.stringify(cmd, null, 2);
+          return `Full command data:\n${cmdStr}`;
+        });
+        
+        // Show truncated preview in main log
+        const cmdStr = JSON.stringify(cmd);
+        const truncatedCmd = cmdStr.length > 200 ? cmdStr.substring(0, 200) + '...' : cmdStr;
+        logger.info(`  Data: ${truncatedCmd}`);
+      });
+      
+      logger.info('\n=== END PTB COMMANDS (DEBUG) ===');
+    } else {
+      // PRODUCTION MODE: Minimal logging
+      logger.info(`PTB validation: ${ptbData.commands.length} commands ready`);
+    }
   }
 
   /**

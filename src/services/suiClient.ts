@@ -7,6 +7,7 @@ import { withRetry } from '../utils/retry';
 import { isTypeArgError } from '../utils/typeArgNormalizer';
 import { SuiClientErrorDecoder } from 'suiclient-error-decoder';
 import { PTBValidator, PTBValidationError } from '../utils/ptbValidator';
+import { debugLog, ifDebug } from '../utils/debugMode';
 
 export class SuiClientService {
   private client: SuiClient;
@@ -229,6 +230,58 @@ export class SuiClientService {
         
         logger.info(`✓ Transaction executed successfully on attempt ${attempt}/${maxRetries}`);
         logger.info(`  Digest: ${result.digest}`);
+        
+        // DEBUG MODE: Log expected vs actual PTB returns
+        ifDebug(() => {
+          logger.info('\n=== PTB EXECUTION RESULTS (DEBUG MODE) ===');
+          
+          // Log object changes
+          if (result.objectChanges) {
+            logger.info(`Object changes: ${result.objectChanges.length} changes`);
+            result.objectChanges.forEach((change, idx) => {
+              debugLog(() => `  Change ${idx}: ${JSON.stringify(change, null, 2)}`);
+            });
+          }
+          
+          // Log events
+          if (result.events) {
+            logger.info(`Events: ${result.events.length} events`);
+            result.events.forEach((event, idx) => {
+              debugLog(() => `  Event ${idx}: ${JSON.stringify(event, null, 2)}`);
+            });
+          }
+          
+          // Log effects
+          if (result.effects) {
+            logger.info(`Effects status: ${result.effects.status.status}`);
+            
+            if (result.effects.created) {
+              logger.info(`  Created objects: ${result.effects.created.length}`);
+              result.effects.created.forEach((obj: any, idx: number) => {
+                logger.info(`    [${idx}] ${obj.reference.objectId}`);
+              });
+            }
+            
+            if (result.effects.mutated) {
+              logger.info(`  Mutated objects: ${result.effects.mutated.length}`);
+              result.effects.mutated.forEach((obj: any, idx: number) => {
+                logger.info(`    [${idx}] ${obj.reference.objectId}`);
+              });
+            }
+            
+            if (result.effects.deleted) {
+              logger.info(`  Deleted objects: ${result.effects.deleted.length}`);
+            }
+            
+            // Log gas used
+            if (result.effects.gasUsed) {
+              logger.info(`  Gas used: ${result.effects.gasUsed.computationCost} computation, ${result.effects.gasUsed.storageCost} storage`);
+            }
+          }
+          
+          logger.info('=== END PTB RESULTS (DEBUG) ===\n');
+        });
+        
         return result;
         
       } catch (error) {

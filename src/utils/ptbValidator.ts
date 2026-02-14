@@ -1,6 +1,7 @@
 import { Transaction } from '@mysten/sui/transactions';
 import { SuiClient } from '@mysten/sui/client';
 import { logger } from './logger';
+import { isDebugMode, debugLog, ifDebug } from './debugMode';
 
 /**
  * PTB Validation Error - Detected before build/execution
@@ -253,24 +254,81 @@ export class PTBValidator {
    * Logs PTB command structure for debugging
    * Use this before build() to inspect command flow
    */
+  /**
+   * Log PTB command structure
+   * In DEBUG_MODE: Prints full PTB structure with detailed command info
+   * In production: Uses minimal logging
+   * 
+   * @param tx Transaction to log
+   * @param label Label for the log output
+   */
   static logCommandStructure(tx: Transaction, label: string = 'PTB'): void {
     const ptbData = tx.getData();
-    logger.info(`=== ${label} COMMAND STRUCTURE ===`);
-    logger.info(`Total commands: ${ptbData.commands.length}`);
     
-    ptbData.commands.forEach((cmd: any, idx: number) => {
-      const kind = cmd.$kind || cmd.kind || 'unknown';
-      logger.info(`Command ${idx}: ${kind}`);
+    if (isDebugMode()) {
+      // DEBUG MODE: Full verbose output
+      logger.info(`=== ${label} COMMAND STRUCTURE (DEBUG MODE) ===`);
+      logger.info(`Total commands: ${ptbData.commands.length}`);
+      logger.info(`Inputs: ${ptbData.inputs.length}`);
       
-      // Log relevant details based on command type
-      if (kind === 'MoveCall') {
-        const target = cmd.target || cmd.MoveCall?.target;
-        logger.info(`  Target: ${target}`);
-      } else if (kind === 'MergeCoins') {
-        logger.info(`  Merging coins`);
-      }
-    });
-    
-    logger.info(`=== END ${label} ===`);
+      // Log all commands with full details
+      ptbData.commands.forEach((cmd: any, idx: number) => {
+        const kind = cmd.$kind || cmd.kind || 'unknown';
+        logger.info(`\nCommand ${idx}: ${kind}`);
+        
+        // Log full command object in debug mode
+        debugLog(() => `  Full command data: ${JSON.stringify(cmd, null, 2)}`);
+        
+        // Log relevant details based on command type
+        if (kind === 'MoveCall') {
+          const target = cmd.target || cmd.MoveCall?.target;
+          const args = cmd.arguments || cmd.MoveCall?.arguments || [];
+          const typeArgs = cmd.typeArguments || cmd.MoveCall?.typeArguments || [];
+          logger.info(`  Target: ${target}`);
+          logger.info(`  Arguments: ${args.length} args`);
+          logger.info(`  Type Arguments: ${typeArgs.length} type args`);
+          
+          // In debug mode, show argument details
+          ifDebug(() => {
+            args.forEach((arg: any, argIdx: number) => {
+              logger.info(`    Arg ${argIdx}: ${JSON.stringify(arg)}`);
+            });
+          });
+        } else if (kind === 'MergeCoins') {
+          const destination = cmd.destination || cmd.MergeCoins?.destination;
+          const sources = cmd.sources || cmd.MergeCoins?.sources || [];
+          logger.info(`  Destination: ${JSON.stringify(destination)}`);
+          logger.info(`  Sources: ${sources.length} coins`);
+          
+          ifDebug(() => {
+            sources.forEach((source: any, srcIdx: number) => {
+              logger.info(`    Source ${srcIdx}: ${JSON.stringify(source)}`);
+            });
+          });
+        } else if (kind === 'SplitCoins') {
+          const coin = cmd.coin || cmd.SplitCoins?.coin;
+          const amounts = cmd.amounts || cmd.SplitCoins?.amounts || [];
+          logger.info(`  Coin: ${JSON.stringify(coin)}`);
+          logger.info(`  Amounts: ${amounts.length} splits`);
+        } else if (kind === 'TransferObjects') {
+          const objects = cmd.objects || cmd.TransferObjects?.objects || [];
+          const address = cmd.address || cmd.TransferObjects?.address;
+          logger.info(`  Objects: ${objects.length} objects`);
+          logger.info(`  Address: ${JSON.stringify(address)}`);
+        }
+      });
+      
+      // Log command index mapping
+      logger.info(`\n=== COMMAND INDEX MAPPING ===`);
+      ptbData.commands.forEach((cmd: any, idx: number) => {
+        const kind = cmd.$kind || cmd.kind || 'unknown';
+        logger.info(`  [${idx}] -> ${kind}`);
+      });
+      
+      logger.info(`=== END ${label} (DEBUG) ===\n`);
+    } else {
+      // PRODUCTION MODE: Minimal logging
+      logger.info(`${label}: ${ptbData.commands.length} commands`);
+    }
   }
 }
