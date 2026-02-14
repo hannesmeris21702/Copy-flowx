@@ -1,6 +1,7 @@
 import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
 import { BotConfig, Pool, Position, RebalanceState } from '../types';
+import { Position as SDKPosition } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
@@ -706,14 +707,68 @@ export class RebalanceService {
         return;
       }
       
+      logger.info('Fetching latest pool state before adding liquidity...');
+      
+      // Fetch the latest pool state from Cetus SDK
+      let latestPool;
+      try {
+        latestPool = await this.cetusService.getSDK().Pool.getPool(pool.id);
+      } catch (error) {
+        logger.error(`Failed to fetch latest pool state for pool ${pool.id}`, error);
+        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+        this.stateManager.clearState();
+        return;
+      }
+      
+      if (!latestPool) {
+        logger.error('Failed to fetch latest pool state: Pool not found');
+        logger.error(`  Pool ID: ${pool.id}`);
+        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+        this.stateManager.clearState();
+        return;
+      }
+      
+      // Get the position from the pool using the NFT ID directly
+      logger.info(`Fetching position by ID: ${positionIdToUse}...`);
+      
+      let poolPosition: SDKPosition;
+      try {
+        poolPosition = await this.cetusService.getSDK().Position.getPositionById(
+          positionIdToUse,
+          false, // calculateRewarder: skip rewarder calculation for performance
+          false  // showDisplay: skip display metadata, not needed for liquidity addition
+        );
+      } catch (error) {
+        logger.error('Failed to fetch position from SDK', error);
+        logger.error(`  Position ID: ${positionIdToUse}`);
+        logger.error(`  Pool ID: ${pool.id}`);
+        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+        this.stateManager.clearState();
+        return;
+      }
+      
+      if (!poolPosition) {
+        logger.error('Position not found in pool state');
+        logger.error(`  Searched for NFT ID: ${positionIdToUse}`);
+        logger.error(`  Pool ID: ${pool.id}`);
+        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+        this.stateManager.clearState();
+        return;
+      }
+      
+      // Log successful position retrieval with clear details
+      logger.info('✅ Using pool-owned position object for addLiquidity');
+      logger.info(`  Position NFT ID: ${positionIdToUse}`);
+      logger.info(`  Pool position object ID: ${poolPosition.pos_object_id}`);
+      logger.info(`  Position index: ${poolPosition.index}`);
+      
       logger.info('Adding liquidity to position...');
-      logger.info(`  Position ID: ${positionIdToUse}`);
       logger.info(`  Using Token A: ${finalAmountA.toString()}`);
       logger.info(`  Using Token B: ${finalAmountB.toString()}`);
       
-      // Add liquidity to the position using ONLY positionIdToUse (never fallback to env)
+      // Add liquidity to the position using the pool-owned position object
       const liquidityResult = await this.addLiquidity(
-        positionIdToUse,
+        poolPosition,
         pool,
         newRange.tickLower,
         newRange.tickUpper,
@@ -1023,7 +1078,7 @@ export class RebalanceService {
    * Add liquidity to a position
    * Uses wallet coin balances and respects available amounts
    * 
-   * @param positionId The position NFT ID
+   * @param position The pool-owned position object (from SDK)
    * @param pool The pool information
    * @param tickLower Lower tick of the position range
    * @param tickUpper Upper tick of the position range
@@ -1033,7 +1088,7 @@ export class RebalanceService {
    * @returns Object with transaction digest
    */
   private async addLiquidity(
-    positionId: string,
+    position: SDKPosition,
     pool: Pool,
     tickLower: number,
     tickUpper: number,
@@ -1044,7 +1099,7 @@ export class RebalanceService {
     const sdk = this.cetusService.getSDK();
     
     logger.info('Adding liquidity to position...');
-    logger.info(`  Position ID: ${positionId}`);
+    logger.info(`  Position object ID: ${position.pos_object_id}`);
     logger.info(`  Amount A: ${amountA.toString()}`);
     logger.info(`  Amount B: ${amountB.toString()}`);
     logger.info(`  Slippage: ${slippagePercent}%`);
@@ -1056,7 +1111,7 @@ export class RebalanceService {
       coinTypeA: pool.coinTypeA,
       coinTypeB: pool.coinTypeB,
       pool_id: pool.id,
-      pos_id: positionId,
+      pos_id: position.pos_object_id,
       delta_liquidity: '0', // SDK will calculate based on max amounts
       max_amount_a: amountA.toString(),
       max_amount_b: amountB.toString(),
