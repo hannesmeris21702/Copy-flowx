@@ -158,45 +158,50 @@ export class CetusService {
       
       logger.info(`Found ${positionIds.length} position(s) in wallet, checking for pool ${this.config.poolId}...`);
       
-      // Check each position to find one for this pool with liquidity > 0
-      for (const positionId of positionIds) {
+      // Fetch all position data in parallel for performance
+      const positionDataPromises = positionIds.map(async (positionId) => {
         try {
           const positionData = await this.sdk.Position.getPositionById(positionId);
-          
-          if (!positionData) {
-            logger.debug(`Position ${positionId} not found, skipping`);
-            continue;
-          }
-          
-          // Check if position is for the target pool
-          if (positionData.pool !== this.config.poolId) {
-            logger.debug(`Position ${positionId} is for pool ${positionData.pool}, skipping`);
-            continue;
-          }
-          
-          // Check if position has liquidity
-          const liquidityBigInt = BigInt(positionData.liquidity);
-          if (liquidityBigInt <= 0n) {
-            logger.debug(`Position ${positionId} has no liquidity, skipping`);
-            continue;
-          }
-          
-          // Found a valid position!
-          logger.info(`✅ Found position ${positionId} for pool with liquidity ${positionData.liquidity}`);
-          
-          return {
-            id: positionData.pos_object_id,
-            poolId: positionData.pool,
-            tickLower: positionData.tick_lower_index,
-            tickUpper: positionData.tick_upper_index,
-            liquidity: positionData.liquidity,
-            coinA: positionData.coin_type_a,
-            coinB: positionData.coin_type_b,
-          };
+          return { positionId, positionData };
         } catch (error) {
-          logger.warn(`Error checking position ${positionId}:`, error);
+          logger.warn(`Error fetching position ${positionId}:`, error);
+          return { positionId, positionData: null };
+        }
+      });
+      
+      const positionResults = await Promise.all(positionDataPromises);
+      
+      // Find the first position for this pool with liquidity > 0
+      for (const { positionId, positionData } of positionResults) {
+        if (!positionData) {
+          logger.debug(`Position ${positionId} not found, skipping`);
           continue;
         }
+        
+        // Check if position is for the target pool
+        if (positionData.pool !== this.config.poolId) {
+          logger.debug(`Position ${positionId} is for pool ${positionData.pool}, skipping`);
+          continue;
+        }
+        
+        // Check if position has liquidity (compare string directly or parse to number)
+        if (positionData.liquidity === '0') {
+          logger.debug(`Position ${positionId} has no liquidity, skipping`);
+          continue;
+        }
+        
+        // Found a valid position!
+        logger.info(`✅ Found position ${positionId} for pool with liquidity ${positionData.liquidity}`);
+        
+        return {
+          id: positionData.pos_object_id,
+          poolId: positionData.pool,
+          tickLower: positionData.tick_lower_index,
+          tickUpper: positionData.tick_upper_index,
+          liquidity: positionData.liquidity,
+          coinA: positionData.coin_type_a,
+          coinB: positionData.coin_type_b,
+        };
       }
       
       logger.info('No positions found for this pool with liquidity > 0');

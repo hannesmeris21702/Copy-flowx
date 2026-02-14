@@ -218,13 +218,14 @@ export class SuiClientService {
           });
           
           // Filter objects that are position NFTs
-          // Position NFTs have type containing "::position::Position"
+          // Position NFTs have type containing "::position::Position" (case-sensitive)
           const positionIds: string[] = [];
           for (const obj of result.data) {
             if (!obj.data) continue;
             
             const objectType = obj.data.type || '';
-            if (objectType.toLowerCase().includes('::position::position')) {
+            // Use case-sensitive matching for exact type match
+            if (objectType.includes('::position::Position')) {
               positionIds.push(obj.data.objectId);
             }
           }
