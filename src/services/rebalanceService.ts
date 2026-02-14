@@ -279,22 +279,27 @@ export class RebalanceService {
     // SAFETY: Check that open_position MoveCall returns at least 1 object
     // Do NOT assume result[0] exists - only reference NestedResult[x,0] if valid
     // 
-    // NOTE: This defensive check handles edge cases where:
-    // - open_position might not return expected tuple structure
-    // - Result array could be empty or malformed
-    // - Future API changes could affect return values
+    // NOTE: Under normal operation, open_position ALWAYS returns (Position NFT, Coin<A>, Coin<B>)
+    // This defensive check handles exceptional edge cases where:
+    // - Contract behavior differs from expected (defensive programming)
+    // - API mismatch or version incompatibility
+    // - Unexpected runtime conditions in the Move function
+    // 
+    // If such an edge case occurs, requirements specify: skip transferObjects,
+    // allow transaction to complete normally to prevent transaction failure
     //
     // Extract position NFT using array destructuring to create NestedResult[x,0] reference
     // If the result doesn't contain a position at index 0, newPosition will be undefined
     const [newPosition] = openPositionResult;
     
-    // Log extraction result for debugging and monitoring
+    // Verify extraction succeeded
     if (newPosition) {
       logger.info('  ✓ Captured: newPosition NFT from result[0]');
     } else {
-      // This warning indicates open_position did not return a position NFT
-      // Possible causes: contract error, API mismatch, or edge case in Move function
-      logger.warn('  ⚠ Position NFT not available from result[0] - this may indicate an issue with open_position call');
+      // Unexpected condition: open_position should always return position NFT
+      // Log as warning - this indicates a potential issue that should be monitored
+      logger.warn('  ⚠ Position NFT not available from result[0] - unexpected condition in open_position');
+      logger.warn('  This should be investigated - open_position normally returns a position NFT');
     }
     
     // ============================================================================
@@ -356,15 +361,21 @@ export class RebalanceService {
       // Per requirements: If no position NFT is returned, skip transferObjects
       // and allow transaction to complete normally (without position-dependent operations)
       //
-      // NOTE: finalCoinA and finalCoinB remain unconsumed in this path
-      // This is intentional - the transaction can still succeed with:
-      // - Fee collection completed
-      // - Old position closed
-      // - Coins available but not deposited into new position
-      // The system remains in a valid state, though rebalancing is incomplete
-      logger.warn('Skipping add_liquidity and transfer - position NFT not available');
+      // NOTE: This path represents an EXCEPTIONAL condition that should not occur in normal operation
+      // Under normal circumstances, open_position always returns a position NFT
+      // 
+      // System state after this path:
+      // - Fee collection: completed ✓
+      // - Old position: closed ✓
+      // - New position: NOT created (edge case handling)
+      // - Coins: unconsumed but available
+      // 
+      // The system remains in a valid state (no dangling references), though rebalancing is incomplete
+      // This defensive approach prevents transaction failure, allowing monitoring and investigation
+      // rather than blocking all subsequent operations
+      logger.warn('Skipping add_liquidity and transfer - position NFT not available (EXCEPTIONAL)');
       logger.info('Transaction will complete without position-dependent operations');
-      logger.info('Coins remain unconsumed but transaction is valid');
+      logger.info('Coins remain unconsumed but transaction is valid - investigation recommended');
     }
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
