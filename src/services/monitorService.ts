@@ -54,7 +54,7 @@ export class MonitorService {
         priceDeviation: 0,
         suggestedNewRange,
         shouldRebalance: false,
-        reason: 'No position configured - bot will create positions dynamically',
+        reason: 'No position found for this pool',
       };
       
       this.logReport(report);
@@ -111,7 +111,7 @@ export class MonitorService {
     logger.info(`Pool: ${report.pool.id}`);
     
     if (!report.position) {
-      logger.info('Position: None (will be created dynamically)');
+      logger.info('Position: None found in wallet for this pool');
       logger.info(`Current Tick: ${report.currentTick}`);
       logger.info(`Suggested New Range: [${report.suggestedNewRange.tickLower}, ${report.suggestedNewRange.tickUpper}]`);
       logger.info(`Status: ${report.reason}`);
