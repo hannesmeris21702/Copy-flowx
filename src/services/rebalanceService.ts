@@ -358,14 +358,17 @@ export class RebalanceService {
     // ============================================================================
     logger.info('Step 4: Validate coins for add_liquidity');
     
-    // Note: Since we capture coins from close_position, they should always be valid
+    // Note: close_position always returns valid coin objects (not null/undefined),
+    // even if the position has no liquidity (in which case coins will have zero balance).
     // The swappedCoinA and swappedCoinB come from either:
     // 1. Direct use of close_position outputs if no swap needed
     // 2. Swap outputs that use close_position outputs as inputs
-    // If either coin is missing, it indicates a bug in either close_position capture or swap logic
+    // If either coin object is missing (null/undefined), it indicates a bug in either 
+    // close_position capture or swap logic.
     if (!swappedCoinA || !swappedCoinB) {
       // This should not happen under normal operation since close_position
-      // always returns valid coins. If we hit this, there's a bug.
+      // always returns valid coin objects (though they may have zero balance if position was empty).
+      // If we hit this, coin objects themselves are missing, which indicates a bug.
       const missingCoins = `${!swappedCoinA ? 'coinA ' : ''}${!swappedCoinB ? 'coinB' : ''}`.trim();
       throw new Error(
         `Missing required coin(s): ${missingCoins}. ` +
