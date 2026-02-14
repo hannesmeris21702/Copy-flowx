@@ -1,4 +1,4 @@
-import { Transaction, TransactionObjectArgument, coinWithBalance } from '@mysten/sui/transactions';
+import { Transaction, TransactionObjectArgument } from '@mysten/sui/transactions';
 import { SUI_CLOCK_OBJECT_ID } from '@mysten/sui/utils';
 import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
@@ -540,8 +540,8 @@ export class RebalanceService {
         return { coinA, coinB };
       }
       
-      const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);
-      
+      // Use actual coins from close_position directly (modern Sui SDK pattern)
+      // No need to create zero coins - swap will use and return the actual coins
       // Use SDK builder pattern: router::swap
       // Returns tuple (Coin<A>, Coin<B>) - extract safely without direct indexing
       const swapResult = ptb.moveCall({
@@ -550,7 +550,7 @@ export class RebalanceService {
         arguments: [
           ptb.object(globalConfigId),
           ptb.object(pool.id),
-          zeroCoinA,
+          coinA,  // Use actual coinA from close_position instead of zero coin
           coinB,
           ptb.pure.bool(false), // a2b: false = B to A
           ptb.pure.bool(true), // by_amount_in
@@ -586,8 +586,8 @@ export class RebalanceService {
         return { coinA, coinB };
       }
       
-      const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);
-      
+      // Use actual coins from close_position directly (modern Sui SDK pattern)
+      // No need to create zero coins - swap will use and return the actual coins
       // Use SDK builder pattern: router::swap
       // Returns tuple (Coin<A>, Coin<B>) - extract safely without direct indexing
       const swapResult = ptb.moveCall({
@@ -597,7 +597,7 @@ export class RebalanceService {
           ptb.object(globalConfigId),
           ptb.object(pool.id),
           coinA,
-          zeroCoinB,
+          coinB,  // Use actual coinB from close_position instead of zero coin
           ptb.pure.bool(true), // a2b: true = A to B
           ptb.pure.bool(true), // by_amount_in
           ptb.pure.u64(U64_MAX),
