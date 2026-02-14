@@ -353,7 +353,7 @@ export class RebalanceService {
       logger.info('  ✓ Liquidity added, coins consumed');
       
       // Step 7: Transfer new position NFT to sender using safeTransfer helper
-      // safeTransfer validates that openPositionResult[0] exists before transferring
+      // safeTransfer checks moveCallResult && moveCallResult[0] before transferring
       logger.info('Step 7: Transfer newPosition NFT to sender');
       this.safeTransfer(ptb, openPositionResult, ptb.pure.address(this.suiClient.getAddress()));
       logger.info('  ✓ Position transferred');
@@ -528,8 +528,10 @@ export class RebalanceService {
    * This prevents errors from attempting to transfer undefined or missing objects,
    * allowing transactions to complete gracefully even if expected results are not present.
    * 
+   * Per requirements: checks moveCallResult && moveCallResult[0] before transferring
+   * 
    * @param ptb - The Transaction builder
-   * @param moveCallResult - The result from a moveCall, which may be an array or single value
+   * @param moveCallResult - The result from a moveCall (can be array-like or single value)
    * @param recipient - The recipient address to transfer to
    */
   private safeTransfer(
@@ -538,7 +540,7 @@ export class RebalanceService {
     recipient: TransactionObjectArgument
   ): void {
     // Check if moveCallResult exists and has at least one element
-    // This handles both array results and ensures [0] element exists
+    // Matches specification: if (moveCallResult && moveCallResult[0])
     if (moveCallResult && moveCallResult[0]) {
       ptb.transferObjects([moveCallResult[0]], recipient);
     }
