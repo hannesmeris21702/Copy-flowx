@@ -11,6 +11,9 @@ import {
   getAmountBFromLiquidity,
 } from '../utils/tickMath';
 
+// Constants
+const MAX_U64 = '18446744073709551615';
+
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
 BigInt.prototype.toJSON = function() { return this.toString(); };
@@ -104,15 +107,19 @@ export class RebalanceService {
       const newPositionId = await this.openPosition(pool, newRange);
       logger.info(`✅ New position opened successfully: ${newPositionId}`);
       
-      // Add liquidity to new position (if there are coins available)
+      // Add liquidity to new position
+      // Note: After closing position, coins are returned to wallet.
+      // The SDK will automatically use available coins from the wallet.
+      // If insufficient coins are available, the transaction will fail gracefully.
       if (expectedAmounts.amountA > BigInt(0) || expectedAmounts.amountB > BigInt(0)) {
         currentStage = 'add_liquidity';
         setSentryContext({ poolId: pool.id, positionId: newPositionId, stage: currentStage });
         logger.info('Step 3: Adding liquidity to new position...');
+        logger.info('  Note: Using coins available in wallet after closing old position');
         await this.addLiquidity(pool, newRange, newPositionId);
         logger.info('✅ Liquidity added successfully');
       } else {
-        logger.info('⊘ Skipping add liquidity (no coins available)');
+        logger.info('⊘ Skipping add liquidity (old position had no liquidity)');
       }
       
       addSentryBreadcrumb('Rebalance completed successfully', 'rebalance', {
@@ -275,6 +282,10 @@ export class RebalanceService {
   /**
    * Add liquidity to position using Cetus SDK
    * Executes add_liquidity as a separate transaction
+   * 
+   * Note: delta_liquidity is set to '0' to let the SDK automatically calculate
+   * the liquidity based on available coin amounts in the wallet. The SDK will
+   * use all available coins up to max_amount_a and max_amount_b limits.
    */
   private async addLiquidity(
     pool: Pool,
@@ -283,20 +294,20 @@ export class RebalanceService {
   ): Promise<void> {
     const sdk = this.cetusService.getSDK();
     
-    // Get available coins for the sender - we'll let the SDK handle coin selection
     // Build the add liquidity transaction using Cetus SDK
+    // The SDK handles coin selection from wallet automatically
     const tx = await sdk.Position.createAddLiquidityPayload({
       coinTypeA: pool.coinTypeA,
       coinTypeB: pool.coinTypeB,
       pool_id: pool.id,
       pos_id: positionId,
-      delta_liquidity: '0', // Let SDK calculate based on coin amounts
-      max_amount_a: '18446744073709551615', // Max u64
-      max_amount_b: '18446744073709551615', // Max u64
+      delta_liquidity: '0', // Let SDK calculate based on available coins
+      max_amount_a: MAX_U64, // Use all available coinA up to max u64
+      max_amount_b: MAX_U64, // Use all available coinB up to max u64
       tick_lower: newRange.tickLower.toString(),
       tick_upper: newRange.tickUpper.toString(),
-      collect_fee: false, // Don't collect fees when adding (we just opened this position)
-      rewarder_coin_types: [], // No rewarder coins for simplicity
+      collect_fee: false, // Don't collect fees (position was just opened)
+      rewarder_coin_types: [], // No rewarder coins
     });
     
     // Execute the transaction

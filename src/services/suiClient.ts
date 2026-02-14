@@ -1,5 +1,6 @@
 import { SuiClient, SuiTransactionBlockResponse } from '@mysten/sui/client';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
 import { BotConfig } from '../types';
 import { logger } from '../utils/logger';
 import { withRetry } from '../utils/retry';
@@ -54,11 +55,11 @@ export class SuiClientService {
    * This is used for sequential transactions built by Cetus SDK
    * Each transaction is independent and executed separately
    * 
-   * @param payload The SDK transaction payload (from Cetus SDK methods)
+   * @param payload The SDK transaction payload (Transaction object from Cetus SDK methods)
    * @returns Promise resolving to the transaction response
    * @throws Error if transaction fails
    */
-  async executeSDKPayload(payload: any): Promise<SuiTransactionBlockResponse> {
+  async executeSDKPayload(payload: Transaction): Promise<SuiTransactionBlockResponse> {
     try {
       logger.info('Executing SDK transaction payload...');
       
@@ -91,7 +92,7 @@ export class SuiClientService {
     }
   }
   
-  async simulateTransaction(tx: any): Promise<void> {
+  async simulateTransaction(tx: Transaction): Promise<void> {
     try {
       await withRetry(
         async () => {
@@ -121,7 +122,7 @@ export class SuiClientService {
     }
   }
   
-  async executeTransaction(tx: any): Promise<SuiTransactionBlockResponse> {
+  async executeTransaction(tx: Transaction): Promise<SuiTransactionBlockResponse> {
     try {
       // First simulate (this builds the transaction)
       await this.simulateTransaction(tx);
