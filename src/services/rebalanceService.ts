@@ -1149,7 +1149,7 @@ export class RebalanceService {
         is_open: true,  // KEY: Opens position AND adds liquidity atomically
         rewarder_coin_types: [],
         collect_fee: false,
-        pos_id: '',  // Empty for new position
+        pos_id: '',  // Empty string indicates new position (SDK requirement)
       },
       {
         slippage: slippagePercent,
