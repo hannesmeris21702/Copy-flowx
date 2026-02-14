@@ -278,14 +278,23 @@ export class RebalanceService {
     
     // SAFETY: Check that open_position MoveCall returns at least 1 object
     // Do NOT assume result[0] exists - only reference NestedResult[x,0] if valid
+    // 
+    // NOTE: This defensive check handles edge cases where:
+    // - open_position might not return expected tuple structure
+    // - Result array could be empty or malformed
+    // - Future API changes could affect return values
+    //
     // Extract position NFT using array destructuring to create NestedResult[x,0] reference
+    // If the result doesn't contain a position at index 0, newPosition will be undefined
     const [newPosition] = openPositionResult;
     
-    // Log extraction result for debugging
+    // Log extraction result for debugging and monitoring
     if (newPosition) {
       logger.info('  ✓ Captured: newPosition NFT from result[0]');
     } else {
-      logger.warn('  ⚠ Position NFT not available from result[0]');
+      // This warning indicates open_position did not return a position NFT
+      // Possible causes: contract error, API mismatch, or edge case in Move function
+      logger.warn('  ⚠ Position NFT not available from result[0] - this may indicate an issue with open_position call');
     }
     
     // ============================================================================
@@ -346,8 +355,16 @@ export class RebalanceService {
     } else {
       // Per requirements: If no position NFT is returned, skip transferObjects
       // and allow transaction to complete normally (without position-dependent operations)
+      //
+      // NOTE: finalCoinA and finalCoinB remain unconsumed in this path
+      // This is intentional - the transaction can still succeed with:
+      // - Fee collection completed
+      // - Old position closed
+      // - Coins available but not deposited into new position
+      // The system remains in a valid state, though rebalancing is incomplete
       logger.warn('Skipping add_liquidity and transfer - position NFT not available');
       logger.info('Transaction will complete without position-dependent operations');
+      logger.info('Coins remain unconsumed but transaction is valid');
     }
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
