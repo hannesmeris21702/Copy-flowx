@@ -50,6 +50,8 @@ Copy `.env.example` to `.env`:
 # Required
 PRIVATE_KEY=0x...          # Your wallet private key
 POOL_ID=0x...             # Cetus pool to manage
+
+# Optional - if not provided, bot scans wallet for pool positions
 POSITION_ID=0x...         # Your position NFT ID
 
 # Mode selection
