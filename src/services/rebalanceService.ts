@@ -363,25 +363,23 @@ export class RebalanceService {
     // 1. Direct use of close_position outputs if no swap needed
     // 2. Swap outputs that use close_position outputs as inputs
     // If either coin is missing, it indicates a bug in either close_position capture or swap logic
-    let finalCoinA = swappedCoinA;
-    let finalCoinB = swappedCoinB;
-    
     if (!swappedCoinA || !swappedCoinB) {
       // This should not happen under normal operation since close_position
       // always returns valid coins. If we hit this, there's a bug.
+      const missingCoins = `${!swappedCoinA ? 'coinA ' : ''}${!swappedCoinB ? 'coinB' : ''}`.trim();
       throw new Error(
-        `Missing coin before add_liquidity: coinA=${!!swappedCoinA}, coinB=${!!swappedCoinB}. ` +
+        `Missing required coin(s): ${missingCoins}. ` +
         'This indicates a bug in close_position output capture or swap logic.'
       );
     }
     
-    logger.info('  ✓ Both coins validated: finalCoinA and finalCoinB ready');
+    logger.info('  ✓ Both coins validated: swappedCoinA and swappedCoinB ready');
     
     // Step 5: Add liquidity to new position
     // NOTE: Under normal operation, open_position returns a valid position NFT
     // If open_position fails, the entire PTB transaction will revert atomically
     // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-    logger.info('Step 5: Add liquidity → consumes finalCoinA, finalCoinB');
+    logger.info('Step 5: Add liquidity → consumes swappedCoinA, swappedCoinB');
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
@@ -390,8 +388,8 @@ export class RebalanceService {
         ptb.object(globalConfigId),
         ptb.object(pool.id),
         newPosition,
-        finalCoinA,
-        finalCoinB,
+        swappedCoinA,
+        swappedCoinB,
         ptb.pure.u64(minAmountA.toString()),
         ptb.pure.u64(minAmountB.toString()),
         ptb.pure.bool(true), // fix_amount_a
