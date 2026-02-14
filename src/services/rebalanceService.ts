@@ -735,8 +735,8 @@ export class RebalanceService {
       try {
         poolPosition = await this.cetusService.getSDK().Position.getPositionById(
           positionIdToUse,
-          false, // don't calculate rewarder
-          false  // don't show display
+          false, // calculateRewarder: skip rewarder calculation for performance
+          false  // showDisplay: skip display metadata, not needed for liquidity addition
         );
       } catch (error) {
         logger.error('Failed to fetch position from SDK', error);
@@ -756,6 +756,7 @@ export class RebalanceService {
         return;
       }
       
+      // Log successful position retrieval with clear details
       logger.info('✅ Using pool-owned position object for addLiquidity');
       logger.info(`  Position NFT ID: ${positionIdToUse}`);
       logger.info(`  Pool position object ID: ${poolPosition.pos_object_id}`);
