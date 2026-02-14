@@ -53,6 +53,7 @@ export interface RebalanceStateData {
     availableA?: string;
     availableB?: string;
     totalValue?: string;
+    closedPositionValue?: string;
     newPositionId?: string;
     tickLower?: number;
     tickUpper?: number;
