@@ -262,10 +262,10 @@ export class RebalanceService {
     const tickLowerU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickLower)));
     const tickUpperU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickUpper)));
     
-    // FIXED: Remove array destructuring - open_position returns single Position NFT
-    // Array destructuring creates NestedResult[10, 0] which causes SecondaryIndexOutOfBounds
-    // when the function returns a single value directly (not as array element)
-    const newPosition = ptb.moveCall({
+    // FIXED: open_position returns multiple values (Position NFT + additional data)
+    // Use array destructuring to extract the Position NFT (first element)
+    // Without destructuring, InvalidResultArity error occurs in command 11
+    const [newPosition] = ptb.moveCall({
       target: `${packageId}::pool_script::open_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
