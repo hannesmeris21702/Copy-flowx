@@ -5,6 +5,7 @@ import { CetusService } from './cetusService';
 import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 import { logPTBValidation } from '../utils/botLogger';
+import { explainError } from '../utils/errorExplainer';
 import { normalizeTypeArguments, validateTypeArguments } from '../utils/typeArgNormalizer';
 import { PTBValidator } from '../utils/ptbValidator';
 import { safeMergeCoins, safeTransferObjects, safeUseNestedResult, safeUseNestedResultOptional } from '../utils/ptbHelpers';
@@ -35,50 +36,93 @@ export class RebalanceService {
   }
   
   async rebalance(pool: Pool, position: Position): Promise<void> {
-    logger.info('=== Starting Atomic PTB Rebalance ===');
-    
-    // Pre-execution validation
-    await this.suiClient.checkGasPrice();
-    
-    // Calculate new range with validated tick spacing
-    const newRange = calculateTickRange(
-      pool.currentTick,
-      this.config.rangeWidthPercent,
-      pool.tickSpacing
-    );
-    
-    logger.info(`Current tick: ${pool.currentTick}`);
-    logger.info(`Old range: [${position.tickLower}, ${position.tickUpper}]`);
-    logger.info(`New range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
-    
-    // Validate tick spacing alignment
-    if (newRange.tickLower % pool.tickSpacing !== 0 || newRange.tickUpper % pool.tickSpacing !== 0) {
-      throw new Error('New range ticks not aligned to tick spacing');
+    try {
+      logger.info('=== Starting Atomic PTB Rebalance ===');
+      
+      // Pre-execution validation
+      await this.suiClient.checkGasPrice();
+      
+      // Calculate new range with validated tick spacing
+      const newRange = calculateTickRange(
+        pool.currentTick,
+        this.config.rangeWidthPercent,
+        pool.tickSpacing
+      );
+      
+      logger.info(`Current tick: ${pool.currentTick}`);
+      logger.info(`Old range: [${position.tickLower}, ${position.tickUpper}]`);
+      logger.info(`New range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+      
+      // Validate tick spacing alignment
+      if (newRange.tickLower % pool.tickSpacing !== 0 || newRange.tickUpper % pool.tickSpacing !== 0) {
+        throw new Error('New range ticks not aligned to tick spacing');
+      }
+      
+      // Calculate expected amounts with slippage protection
+      // FIXED: Use bigint arithmetic to avoid precision loss
+      const expectedAmounts = this.calculateExpectedAmounts(pool, position);
+      const slippagePercent = BigInt(Math.floor(this.config.maxSlippagePercent * 100)); // Convert to basis points
+      const minAmountA = (expectedAmounts.amountA * (BigInt(10000) - slippagePercent)) / BigInt(10000);
+      const minAmountB = (expectedAmounts.amountB * (BigInt(10000) - slippagePercent)) / BigInt(10000);
+      
+      logger.info(`Expected amounts: A=${expectedAmounts.amountA}, B=${expectedAmounts.amountB}`);
+      logger.info(`Min amounts (${this.config.maxSlippagePercent}% slippage): A=${minAmountA}, B=${minAmountB}`);
+      
+      // Build single atomic PTB with pre-build validation
+      // @copilot PTB validation happens inside buildRebalancePTB to catch errors early
+      const ptb = await this.buildRebalancePTB(pool, position, newRange, minAmountA, minAmountB);
+      
+      // Log PTB structure for debugging (helps with SecondaryIndexOutOfBounds)
+      PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
+      
+      // Execute atomically (single execution)
+      logger.info('Executing atomic PTB...');
+      const result = await this.suiClient.executeTransactionWithoutSimulation(ptb);
+      
+      logger.info(`✅ Rebalance successful! Digest: ${result.digest}`);
+      logger.info('=== Atomic PTB Rebalance Complete ===');
+      
+    } catch (error) {
+      // Use error explainer to provide clear guidance
+      logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      logger.error('❌ REBALANCE EXECUTION FAILED');
+      logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      
+      const explained = explainError(error as Error);
+      
+      if (explained.matched) {
+        logger.error(`\n📋 ERROR TYPE: ${explained.errorType}`);
+        logger.error(`\n📖 EXPLANATION:\n${explained.explanation!.description}`);
+        
+        logger.error(`\n🔍 POSSIBLE CAUSES:`);
+        explained.explanation!.causes.forEach((cause, idx) => {
+          logger.error(`  ${idx + 1}. ${cause}`);
+        });
+        
+        logger.error(`\n💡 SUGGESTED SOLUTIONS:`);
+        explained.explanation!.fixes.forEach((fix, idx) => {
+          logger.error(`  ${idx + 1}. ${fix}`);
+        });
+        
+        if (explained.explanation!.examples && explained.explanation!.examples.length > 0) {
+          logger.error(`\n📝 EXAMPLES:`);
+          explained.explanation!.examples.forEach(example => {
+            logger.error(`  ${example}`);
+          });
+        }
+      } else {
+        logger.error(`\n⚠️  Unknown error type - no specific explanation available`);
+      }
+      
+      // Log original error with stack trace
+      logger.error(`\n🐛 ORIGINAL ERROR:`);
+      logger.error(error as Error);
+      
+      logger.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      
+      // Re-throw the error - don't suppress it
+      throw error;
     }
-    
-    // Calculate expected amounts with slippage protection
-    // FIXED: Use bigint arithmetic to avoid precision loss
-    const expectedAmounts = this.calculateExpectedAmounts(pool, position);
-    const slippagePercent = BigInt(Math.floor(this.config.maxSlippagePercent * 100)); // Convert to basis points
-    const minAmountA = (expectedAmounts.amountA * (BigInt(10000) - slippagePercent)) / BigInt(10000);
-    const minAmountB = (expectedAmounts.amountB * (BigInt(10000) - slippagePercent)) / BigInt(10000);
-    
-    logger.info(`Expected amounts: A=${expectedAmounts.amountA}, B=${expectedAmounts.amountB}`);
-    logger.info(`Min amounts (${this.config.maxSlippagePercent}% slippage): A=${minAmountA}, B=${minAmountB}`);
-    
-    // Build single atomic PTB with pre-build validation
-    // @copilot PTB validation happens inside buildRebalancePTB to catch errors early
-    const ptb = await this.buildRebalancePTB(pool, position, newRange, minAmountA, minAmountB);
-    
-    // Log PTB structure for debugging (helps with SecondaryIndexOutOfBounds)
-    PTBValidator.logCommandStructure(ptb, 'REBALANCE PTB');
-    
-    // Execute atomically (single execution)
-    logger.info('Executing atomic PTB...');
-    const result = await this.suiClient.executeTransactionWithoutSimulation(ptb);
-    
-    logger.info(`✅ Rebalance successful! Digest: ${result.digest}`);
-    logger.info('=== Atomic PTB Rebalance Complete ===');
   }
   
   private calculateExpectedAmounts(pool: Pool, position: Position): { amountA: bigint; amountB: bigint } {
