@@ -321,3 +321,104 @@ export function checkSwapRequired(
     reason,
   };
 }
+
+/**
+ * Calculate swap amount needed to achieve optimal ratio
+ * 
+ * @param availableA Amount of tokenA available
+ * @param availableB Amount of tokenB available
+ * @param optimalRatio Target ratio (amountA / amountB)
+ * @param currentPrice Current price (tokenB per tokenA)
+ * @returns Swap details including amount and direction
+ */
+export function calculateSwapAmount(
+  availableA: bigint,
+  availableB: bigint,
+  optimalRatio: number,
+  currentPrice: number
+): {
+  swapFromA: boolean;
+  swapAmount: bigint;
+  expectedOutput: bigint;
+} | null {
+  // Handle special cases
+  if (optimalRatio === Infinity) {
+    // Need only A, swap all B to A
+    if (availableB > BigInt(0)) {
+      return {
+        swapFromA: false,
+        swapAmount: availableB,
+        expectedOutput: BigInt(Math.floor(Number(availableB) / currentPrice)),
+      };
+    }
+    return null;
+  }
+  
+  if (optimalRatio === 0) {
+    // Need only B, swap all A to B
+    if (availableA > BigInt(0)) {
+      return {
+        swapFromA: true,
+        swapAmount: availableA,
+        expectedOutput: BigInt(Math.floor(Number(availableA) * currentPrice)),
+      };
+    }
+    return null;
+  }
+  
+  // Calculate current and target values
+  const availableANum = Number(availableA);
+  const availableBNum = Number(availableB);
+  const currentRatio = availableANum / availableBNum;
+  
+  // If we need more A (current ratio < optimal ratio)
+  if (currentRatio < optimalRatio) {
+    // Swap some B to A
+    // After swap: (availableA + deltaA) / (availableB - deltaB) = optimalRatio
+    // Where deltaA = deltaB / price
+    // Solving: availableA + deltaB/price = optimalRatio * (availableB - deltaB)
+    // availableA + deltaB/price = optimalRatio * availableB - optimalRatio * deltaB
+    // deltaB/price + optimalRatio * deltaB = optimalRatio * availableB - availableA
+    // deltaB * (1/price + optimalRatio) = optimalRatio * availableB - availableA
+    // deltaB = (optimalRatio * availableB - availableA) / (1/price + optimalRatio)
+    
+    const deltaBNum = (optimalRatio * availableBNum - availableANum) / (1 / currentPrice + optimalRatio);
+    
+    if (deltaBNum <= 0 || deltaBNum > availableBNum) {
+      return null;
+    }
+    
+    const swapAmount = BigInt(Math.floor(deltaBNum));
+    const expectedOutput = BigInt(Math.floor(deltaBNum / currentPrice));
+    
+    return {
+      swapFromA: false,
+      swapAmount,
+      expectedOutput,
+    };
+  } else {
+    // Swap some A to B
+    // After swap: (availableA - deltaA) / (availableB + deltaB) = optimalRatio
+    // Where deltaB = deltaA * price
+    // Solving: availableA - deltaA = optimalRatio * (availableB + deltaA * price)
+    // availableA - deltaA = optimalRatio * availableB + optimalRatio * price * deltaA
+    // availableA - optimalRatio * availableB = deltaA + optimalRatio * price * deltaA
+    // availableA - optimalRatio * availableB = deltaA * (1 + optimalRatio * price)
+    // deltaA = (availableA - optimalRatio * availableB) / (1 + optimalRatio * price)
+    
+    const deltaANum = (availableANum - optimalRatio * availableBNum) / (1 + optimalRatio * currentPrice);
+    
+    if (deltaANum <= 0 || deltaANum > availableANum) {
+      return null;
+    }
+    
+    const swapAmount = BigInt(Math.floor(deltaANum));
+    const expectedOutput = BigInt(Math.floor(deltaANum * currentPrice));
+    
+    return {
+      swapFromA: true,
+      swapAmount,
+      expectedOutput,
+    };
+  }
+}

@@ -4,7 +4,7 @@ import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 import { explainError } from '../utils/errorExplainer';
 import { setSentryContext, addSentryBreadcrumb, captureException } from '../utils/sentry';
-import { calculateQuoteValue, calculateTickRange, checkSwapRequired } from '../utils/tickMath';
+import { calculateQuoteValue, calculateTickRange, checkSwapRequired, sqrtPriceToPrice, calculateSwapAmount } from '../utils/tickMath';
 
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
@@ -141,6 +141,83 @@ export class RebalanceService {
       logger.info(`Reason: ${swapCheck.reason}`);
       logger.info('=================================');
       
+      // Execute swap if required
+      if (swapCheck.swapRequired) {
+        currentStage = 'execute_swap';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Swap is required - executing swap...');
+        
+        // Calculate swap amount
+        const currentPrice = sqrtPriceToPrice(sqrtPrice);
+        const swapDetails = calculateSwapAmount(
+          availableA,
+          availableB,
+          swapCheck.optimalRatio,
+          currentPrice
+        );
+        
+        if (!swapDetails) {
+          logger.error('Unable to calculate swap amount');
+          throw new Error('Failed to calculate swap amount to achieve optimal ratio');
+        }
+        
+        logger.info('=== Swap Details ===');
+        logger.info(`Direction: ${swapDetails.swapFromA ? 'Token A → Token B' : 'Token B → Token A'}`);
+        logger.info(`Swap Amount: ${swapDetails.swapAmount}`);
+        logger.info(`Expected Output: ${swapDetails.expectedOutput}`);
+        logger.info('====================');
+        
+        // Execute swap
+        await this.executeSwap(
+          pool,
+          swapDetails.swapFromA,
+          swapDetails.swapAmount,
+          this.config.maxSlippagePercent
+        );
+        
+        addSentryBreadcrumb('Swap executed', 'rebalance', {
+          positionId: position.id,
+          swapFromA: swapDetails.swapFromA,
+          swapAmount: swapDetails.swapAmount.toString(),
+          expectedOutput: swapDetails.expectedOutput.toString(),
+        });
+        
+        // Refresh wallet balances after swap
+        currentStage = 'refresh_balances_after_swap';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        logger.info('Refreshing wallet balances after swap...');
+        
+        const newAvailableA = await this.suiClient.getWalletBalance(pool.coinTypeA);
+        const newAvailableB = await this.suiClient.getWalletBalance(pool.coinTypeB);
+        
+        logger.info('=== Updated Wallet Balances ===');
+        logger.info(`Token A: ${newAvailableA}`);
+        logger.info(`Token B: ${newAvailableB}`);
+        
+        // Recalculate value after swap
+        const { valueA: newValueA, valueB: newValueB, totalValue: newTotalValue } = calculateQuoteValue(
+          newAvailableA,
+          newAvailableB,
+          sqrtPrice
+        );
+        
+        logger.info('=== Updated Portfolio Value ===');
+        logger.info(`Value of Token A: ${newValueA.toFixed(6)}`);
+        logger.info(`Value of Token B: ${newValueB.toFixed(6)}`);
+        logger.info(`Total Value: ${newTotalValue.toFixed(6)}`);
+        logger.info(`Value preserved: ${Math.abs(newTotalValue - totalValue) < 0.01 * totalValue ? 'YES' : 'NO (within slippage)'}`);
+        logger.info('================================');
+        
+        addSentryBreadcrumb('Balances refreshed after swap', 'rebalance', {
+          positionId: position.id,
+          newAvailableA: newAvailableA.toString(),
+          newAvailableB: newAvailableB.toString(),
+          newTotalValue: newTotalValue.toString(),
+        });
+      } else {
+        logger.info('No swap required - token ratio is acceptable');
+      }
+      
       addSentryBreadcrumb('Wallet balances queried', 'rebalance', {
         positionId: position.id,
         availableA: availableA.toString(),
@@ -245,5 +322,46 @@ export class RebalanceService {
     // Execute the transaction and wait for confirmation
     // Coins are automatically returned to wallet (no return value capture)
     await this.suiClient.executeSDKPayload(tx);
+  }
+  
+  /**
+   * Execute a token swap using Cetus SDK
+   * Swaps tokens to achieve optimal ratio for new position
+   */
+  private async executeSwap(
+    pool: Pool,
+    swapFromA: boolean,
+    swapAmount: bigint,
+    slippagePercent: number
+  ): Promise<void> {
+    const sdk = this.cetusService.getSDK();
+    
+    logger.info('Executing swap...');
+    logger.info(`  Direction: ${swapFromA ? 'A → B' : 'B → A'}`);
+    logger.info(`  Amount: ${swapAmount}`);
+    logger.info(`  Slippage: ${slippagePercent}%`);
+    
+    // Calculate amount limit based on slippage
+    // For swap in, we get less output so we need minimum output
+    // amount_limit = expectedOutput * (1 - slippage)
+    const slippageFactor = 1 - slippagePercent / 100;
+    const amountLimit = BigInt(Math.floor(Number(swapAmount) * slippageFactor));
+    
+    // Build the swap transaction using Cetus SDK
+    // a2b = true means swap A to B, false means swap B to A
+    const tx = await sdk.Swap.createSwapTransactionPayload({
+      pool_id: pool.id,
+      coinTypeA: pool.coinTypeA,
+      coinTypeB: pool.coinTypeB,
+      a2b: swapFromA,
+      by_amount_in: true,
+      amount: swapAmount.toString(),
+      amount_limit: amountLimit.toString(),
+    });
+    
+    // Execute the transaction and wait for confirmation
+    await this.suiClient.executeSDKPayload(tx);
+    
+    logger.info('✅ Swap executed successfully');
   }
 }
