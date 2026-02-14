@@ -24,14 +24,16 @@ export class PTBAssertionError extends Error {
  */
 
 /**
- * Asserts that a MoveCall result can be safely accessed at a given nested index.
+ * Asserts that a nested index is valid for accessing MoveCall results.
  * Use this before destructuring or accessing specific outputs from a MoveCall.
  * 
- * @param result - The TransactionObjectArgument result from a moveCall
+ * Note: This validates the index value, not the actual result structure,
+ * as result structure can only be verified at runtime during execution.
+ * 
  * @param nestedIndex - The index to access (e.g., 0 for first result, 1 for second)
  * @param commandIndex - The command index in the PTB for error messages
  * @param moveCallTarget - The MoveCall target (e.g., "package::module::function") for error messages
- * @throws PTBAssertionError if the result cannot be accessed safely
+ * @throws PTBAssertionError if the nested index is invalid
  * 
  * @example
  * ```typescript
@@ -40,20 +42,18 @@ export class PTBAssertionError extends Error {
  *   arguments: [...]
  * });
  * 
- * // Before accessing openPositionResult[0], validate it exists
- * assertNestedResultExists(openPositionResult, 0, 4, `${packageId}::pool_script::open_position`);
+ * // Validate the index before accessing openPositionResult[0]
+ * assertNestedResultExists(0, 4, `${packageId}::pool_script::open_position`);
  * const [newPosition] = openPositionResult;
  * ```
  */
 export function assertNestedResultExists(
-  _result: TransactionObjectArgument | TransactionObjectArgument[],
   nestedIndex: number,
   commandIndex: number,
   moveCallTarget: string
 ): void {
-  // Array results can be safely destructured - TypeScript handles this
-  // The issue only occurs at runtime when the blockchain doesn't return expected results
-  // This function serves as documentation and a pre-check for known edge cases
+  // Validates the index value is non-negative
+  // The actual result structure can only be verified at runtime during execution
   
   if (nestedIndex < 0) {
     throw new PTBAssertionError(
@@ -146,11 +146,12 @@ export function createSecondaryIndexOutOfBoundsError(
 }
 
 /**
- * Validates a PTB command result before using it in subsequent commands.
- * This is a comprehensive check that logs the validation attempt.
+ * Validates a PTB command result metadata before using it in subsequent commands.
+ * This is a validation of expected behavior rather than runtime structure inspection.
  * 
- * @param ptb - The Transaction object (for future introspection)
- * @param result - The result to validate
+ * Note: Actual result count can only be verified during dry-run or execution,
+ * not at PTB build time. This function validates expectations and logs attempts.
+ * 
  * @param expectedCount - Expected number of nested results (optional)
  * @param commandIndex - The command index for error messages
  * @param moveCallTarget - The MoveCall target for error messages
@@ -163,14 +164,12 @@ export function createSecondaryIndexOutOfBoundsError(
  *   arguments: [...]
  * });
  * 
- * // Validate that open_position returns at least 1 result (the position NFT)
- * validateCommandResult(ptb, result, 1, 4, `${packageId}::pool_script::open_position`);
- * const [newPosition] = result;  // Safe to destructure now
+ * // Validate that open_position is expected to return at least 1 result
+ * validateCommandResult(1, 4, `${packageId}::pool_script::open_position`);
+ * const [newPosition] = result;  // Safe to destructure based on expectations
  * ```
  */
 export function validateCommandResult(
-  _ptb: Transaction,
-  _result: TransactionObjectArgument | TransactionObjectArgument[],
   expectedCount: number | undefined,
   commandIndex: number,
   moveCallTarget: string
@@ -231,7 +230,7 @@ export function extractMoveCallTarget(ptb: Transaction, commandIndex: number): s
     }
     
     // Extract target from MoveCall structure
-    if (cmd.$kind === 'MoveCall' && cmd.MoveCall) {
+    if (cmd.MoveCall) {
       const { package: pkg, module, function: func } = cmd.MoveCall;
       return `${pkg}::${module}::${func}`;
     }
@@ -287,15 +286,32 @@ export function safeDestructure(
   
   // Validate each nested index
   for (let i = 0; i < count; i++) {
-    assertNestedResultExists(result, i, commandIndex, moveCallTarget);
+    assertNestedResultExists(i, commandIndex, moveCallTarget);
   }
   
   // Perform destructuring
   if (Array.isArray(result)) {
+    if (result.length < count) {
+      throw new PTBAssertionError(
+        `Cannot destructure ${count} results from command ${commandIndex} (${moveCallTarget}): ` +
+        `array only has ${result.length} element(s). ` +
+        `This indicates a mismatch between expected and actual result count.`,
+        commandIndex,
+        moveCallTarget
+      );
+    }
     return result.slice(0, count);
   }
   
   // Single result - return as array
+  if (count !== 1) {
+    throw new PTBAssertionError(
+      `Cannot destructure ${count} results from command ${commandIndex} (${moveCallTarget}): ` +
+      `result is a single value, not an array. Expected count should be 1.`,
+      commandIndex,
+      moveCallTarget
+    );
+  }
   return [result];
 }
 
