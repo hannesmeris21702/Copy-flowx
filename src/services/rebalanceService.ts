@@ -244,17 +244,21 @@ export class RebalanceService {
         sqrtPrice,
         newRange.tickLower,
         newRange.tickUpper,
-        this.config.swapRatioTolerancePercent
+        1 // Use 1% tolerance as per requirements
       );
       
-      logger.info('=== Swap Requirement Analysis ===');
+      logger.info('=== Swap Requirement Analysis (Value-Based) ===');
+      logger.info(`Required Token A: ${swapCheck.requiredA.toString()}`);
+      logger.info(`Required Token B: ${swapCheck.requiredB.toString()}`);
+      logger.info(`Available Token A: ${availableA.toString()}`);
+      logger.info(`Available Token B: ${availableB.toString()}`);
       logger.info(`Optimal Ratio (A/B): ${swapCheck.optimalRatio === Infinity ? 'Infinity (only A needed)' : swapCheck.optimalRatio.toFixed(6)}`);
       logger.info(`Available Ratio (A/B): ${swapCheck.availableRatio === Infinity ? 'Infinity (only A available)' : swapCheck.availableRatio.toFixed(6)}`);
-      logger.info(`Ratio Mismatch: ${swapCheck.ratioMismatchPercent.toFixed(2)}%`);
-      logger.info(`Tolerance: ${this.config.swapRatioTolerancePercent}%`);
+      logger.info(`Value Mismatch: ${swapCheck.ratioMismatchPercent.toFixed(2)}%`);
+      logger.info(`Tolerance: 1%`);
       logger.info(`Swap Required: ${swapCheck.swapRequired ? 'YES' : 'NO'}`);
       logger.info(`Reason: ${swapCheck.reason}`);
-      logger.info('=================================');
+      logger.info('================================================');
       
       // Execute swap if required
       // Skip if already completed (state >= SWAP_COMPLETED)
@@ -276,26 +280,27 @@ export class RebalanceService {
         currentStage = 'execute_swap';
         setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
         logger.info('Swap is required - executing swap...');
+        logger.info(`Swap decision reason: ${swapCheck.reason}`);
         
-        // Calculate swap amount
-        const currentPrice = sqrtPriceToPrice(sqrtPrice);
+        // Calculate swap amount using value-based approach
         const swapDetails = calculateSwapAmount(
           availableA,
           availableB,
-          swapCheck.optimalRatio,
-          currentPrice
+          swapCheck.requiredA,
+          swapCheck.requiredB,
+          sqrtPrice
         );
         
         if (!swapDetails) {
           logger.error('Unable to calculate swap amount');
-          throw new Error('Failed to calculate swap amount to achieve optimal ratio');
+          throw new Error('Failed to calculate swap amount to achieve required distribution');
         }
         
-        logger.info('=== Swap Details ===');
+        logger.info('=== Swap Details (Value-Based) ===');
         logger.info(`Direction: ${swapDetails.swapFromA ? 'Token A → Token B' : 'Token B → Token A'}`);
         logger.info(`Swap Amount: ${swapDetails.swapAmount}`);
         logger.info(`Expected Output: ${swapDetails.expectedOutput}`);
-        logger.info('====================');
+        logger.info('===================================');
         
         // Execute swap
         const swapResult = await this.executeSwap(
@@ -305,7 +310,10 @@ export class RebalanceService {
           this.config.maxSlippagePercent
         );
         
-        // Structured log for swap execution (reuse currentPrice from above)
+        // Get current price for logging
+        const currentPrice = sqrtPriceToPrice(sqrtPrice);
+        
+        // Structured log for swap execution
         logSwap({
           direction: swapDetails.swapFromA ? SwapDirection.A_TO_B : SwapDirection.B_TO_A,
           reason: swapCheck.reason,
@@ -628,23 +636,41 @@ export class RebalanceService {
       logger.info('========================================');
       
       // Step 6: Validation BEFORE addLiquidity
-      logger.info('=== Step 6: Validation Before addLiquidity ===');
+      logger.info('=== Step 6: Enhanced Validation Before addLiquidity ===');
       let validationPassed = false;
+      let validationErrors: string[] = [];
       
+      // HARD SAFETY CHECK 1: Never allow both tokens to be zero
+      if (finalAmountA === BigInt(0) && finalAmountB === BigInt(0)) {
+        validationErrors.push('Both tokens are zero - cannot add liquidity');
+        logger.error('❌ HARD SAFETY CHECK FAILED: Both tokens are zero');
+      }
+      
+      // HARD SAFETY CHECK 2: Validate based on price position
       if (pricePosition === PricePosition.INSIDE) {
         if (finalAmountA > BigInt(0) && finalAmountB > BigInt(0)) {
           logger.info('✅ Validation PASSED: Both tokens have positive amounts (INSIDE position)');
           validationPassed = true;
         } else {
+          validationErrors.push('INSIDE position requires both tokens > 0');
           logger.error('❌ Validation FAILED: INSIDE position requires both tokens > 0');
           logger.error(`  Final Amount A: ${finalAmountA.toString()}`);
           logger.error(`  Final Amount B: ${finalAmountB.toString()}`);
+          
+          // Check which token is missing
+          if (finalAmountA === BigInt(0)) {
+            validationErrors.push('Missing required Token A for INSIDE position');
+          }
+          if (finalAmountB === BigInt(0)) {
+            validationErrors.push('Missing required Token B for INSIDE position');
+          }
         }
       } else if (pricePosition === PricePosition.BELOW) {
         if (finalAmountA > BigInt(0)) {
           logger.info('✅ Validation PASSED: Token A has positive amount (BELOW position)');
           validationPassed = true;
         } else {
+          validationErrors.push('BELOW position requires Token A > 0');
           logger.error('❌ Validation FAILED: BELOW position requires Token A > 0');
           logger.error(`  Final Amount A: ${finalAmountA.toString()}`);
         }
@@ -654,9 +680,19 @@ export class RebalanceService {
           logger.info('✅ Validation PASSED: Token B has positive amount (ABOVE position)');
           validationPassed = true;
         } else {
+          validationErrors.push('ABOVE position requires Token B > 0');
           logger.error('❌ Validation FAILED: ABOVE position requires Token B > 0');
           logger.error(`  Final Amount B: ${finalAmountB.toString()}`);
         }
+      }
+      
+      // Log all validation errors
+      if (validationErrors.length > 0) {
+        logger.error('=== Validation Errors ===');
+        validationErrors.forEach((error, idx) => {
+          logger.error(`  ${idx + 1}. ${error}`);
+        });
+        logger.error('=========================');
       }
       
       if (!validationPassed) {

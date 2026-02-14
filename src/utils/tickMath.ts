@@ -245,14 +245,31 @@ export function checkSwapRequired(
   currentSqrtPrice: bigint,
   tickLower: number,
   tickUpper: number,
-  tolerancePercent: number = 5
+  tolerancePercent: number = 1
 ): {
   swapRequired: boolean;
   optimalRatio: number;
   availableRatio: number;
   ratioMismatchPercent: number;
   reason: string;
+  requiredA: bigint;
+  requiredB: bigint;
 } {
+  // Calculate total available value
+  const { totalValue: availableValue } = calculateQuoteValue(
+    availableA,
+    availableB,
+    currentSqrtPrice
+  );
+  
+  // Get required amounts using CLMM math for the new range
+  const { requiredA, requiredB } = getAmountsForLiquidity(
+    availableValue,
+    currentSqrtPrice,
+    tickLower,
+    tickUpper
+  );
+  
   // Calculate optimal ratio for the new range
   const optimalRatio = calculateOptimalRatio(currentSqrtPrice, tickLower, tickUpper);
   
@@ -264,163 +281,197 @@ export function checkSwapRequired(
     availableRatio = Number(availableA) / Number(availableB);
   }
   
-  // Handle special cases
-  if (optimalRatio === Infinity && availableRatio === Infinity) {
-    // Both infinite (only A needed, only A available) - no swap needed
-    return {
-      swapRequired: false,
-      optimalRatio,
-      availableRatio,
-      ratioMismatchPercent: 0,
-      reason: 'Only tokenA needed and available',
-    };
-  }
-  
-  if (optimalRatio === 0 && availableB > BigInt(0) && availableA === BigInt(0)) {
-    // Only B needed, only B available - no swap needed
-    return {
-      swapRequired: false,
-      optimalRatio,
-      availableRatio: 0,
-      ratioMismatchPercent: 0,
-      reason: 'Only tokenB needed and available',
-    };
-  }
-  
-  if (optimalRatio === Infinity || availableRatio === Infinity) {
-    // One is infinite but not both - swap needed
+  // MANDATORY RULE 1: If requiredTokenA > 0 AND walletTokenA == 0 → swap B → A
+  if (requiredA > BigInt(0) && availableA === BigInt(0)) {
     return {
       swapRequired: true,
       optimalRatio,
       availableRatio,
       ratioMismatchPercent: 100,
-      reason: 'Ratio mismatch: one token exclusively needed but both available',
+      reason: 'Required tokenA > 0 but wallet has 0 tokenA - must swap B → A',
+      requiredA,
+      requiredB,
     };
   }
   
-  // Calculate ratio mismatch percentage
-  // Use relative difference: |optimal - available| / optimal * 100
-  let ratioMismatchPercent: number;
-  if (optimalRatio === 0) {
-    ratioMismatchPercent = availableRatio > 0 ? 100 : 0;
-  } else {
-    ratioMismatchPercent = Math.abs(optimalRatio - availableRatio) / optimalRatio * 100;
+  // MANDATORY RULE 2: If requiredTokenB > 0 AND walletTokenB == 0 → swap A → B
+  if (requiredB > BigInt(0) && availableB === BigInt(0)) {
+    return {
+      swapRequired: true,
+      optimalRatio,
+      availableRatio,
+      ratioMismatchPercent: 100,
+      reason: 'Required tokenB > 0 but wallet has 0 tokenB - must swap A → B',
+      requiredA,
+      requiredB,
+    };
   }
   
-  const swapRequired = ratioMismatchPercent > tolerancePercent;
+  // Calculate value distribution
+  const { valueA: availableValueA, valueB: availableValueB } = calculateQuoteValue(
+    availableA,
+    availableB,
+    currentSqrtPrice
+  );
   
-  const reason = swapRequired
-    ? `Ratio mismatch ${ratioMismatchPercent.toFixed(2)}% exceeds tolerance ${tolerancePercent}%`
-    : `Ratio mismatch ${ratioMismatchPercent.toFixed(2)}% within tolerance ${tolerancePercent}%`;
+  const { valueA: requiredValueA, valueB: requiredValueB } = calculateQuoteValue(
+    requiredA,
+    requiredB,
+    currentSqrtPrice
+  );
   
+  // MANDATORY RULE 3: If wallet value distribution differs from required by more than tolerance%, swap
+  const totalRequiredValue = requiredValueA + requiredValueB;
+  const totalAvailableValue = availableValueA + availableValueB;
+  
+  if (totalRequiredValue > 0 && totalAvailableValue > 0) {
+    const requiredPercentA = (requiredValueA / totalRequiredValue) * 100;
+    const availablePercentA = (availableValueA / totalAvailableValue) * 100;
+    const valueMismatchPercent = Math.abs(requiredPercentA - availablePercentA);
+    
+    if (valueMismatchPercent > tolerancePercent) {
+      return {
+        swapRequired: true,
+        optimalRatio,
+        availableRatio,
+        ratioMismatchPercent: valueMismatchPercent,
+        reason: `Value distribution mismatch ${valueMismatchPercent.toFixed(2)}% exceeds tolerance ${tolerancePercent}%`,
+        requiredA,
+        requiredB,
+      };
+    }
+  }
+  
+  // MANDATORY RULE 4: If both required tokens > 0, ensure BOTH wallet balances > 0
+  if (requiredA > BigInt(0) && requiredB > BigInt(0)) {
+    if (availableA === BigInt(0) || availableB === BigInt(0)) {
+      return {
+        swapRequired: true,
+        optimalRatio,
+        availableRatio,
+        ratioMismatchPercent: 100,
+        reason: 'Both tokens required but one wallet balance is 0',
+        requiredA,
+        requiredB,
+      };
+    }
+  }
+  
+  // No swap needed
   return {
-    swapRequired,
+    swapRequired: false,
     optimalRatio,
     availableRatio,
-    ratioMismatchPercent,
-    reason,
+    ratioMismatchPercent: 0,
+    reason: 'Wallet balances match required distribution within tolerance',
+    requiredA,
+    requiredB,
   };
 }
 
 /**
- * Calculate swap amount needed to achieve optimal ratio
+ * Calculate swap amount needed to achieve required token distribution
+ * Uses value-based calculation to ensure proper liquidity re-addition
  * 
- * @param availableA Amount of tokenA available
- * @param availableB Amount of tokenB available
- * @param optimalRatio Target ratio (amountA / amountB)
- * @param currentPrice Current price (tokenB per tokenA)
+ * @param availableA Amount of tokenA available in wallet
+ * @param availableB Amount of tokenB available in wallet
+ * @param requiredA Amount of tokenA required for new position
+ * @param requiredB Amount of tokenB required for new position
+ * @param currentSqrtPrice Current sqrt price from pool
  * @returns Swap details including amount and direction
  */
 export function calculateSwapAmount(
   availableA: bigint,
   availableB: bigint,
-  optimalRatio: number,
-  currentPrice: number
+  requiredA: bigint,
+  requiredB: bigint,
+  currentSqrtPrice: bigint
 ): {
   swapFromA: boolean;
   swapAmount: bigint;
   expectedOutput: bigint;
 } | null {
-  // Handle special cases
-  if (optimalRatio === Infinity) {
-    // Need only A, swap all B to A
+  const currentPrice = sqrtPriceToPrice(currentSqrtPrice);
+  
+  // Calculate values for available tokens
+  const { valueA: availableValueA, valueB: availableValueB } = calculateQuoteValue(
+    availableA,
+    availableB,
+    currentSqrtPrice
+  );
+  
+  // Calculate values for required tokens
+  const { valueA: requiredValueA, valueB: requiredValueB } = calculateQuoteValue(
+    requiredA,
+    requiredB,
+    currentSqrtPrice
+  );
+  
+  // Handle special case: only token A needed
+  if (requiredB === BigInt(0) && requiredA > BigInt(0)) {
     if (availableB > BigInt(0)) {
+      // Need to swap all B to A
       return {
         swapFromA: false,
         swapAmount: availableB,
         expectedOutput: BigInt(Math.floor(Number(availableB) / currentPrice)),
       };
     }
-    return null;
+    return null; // Already have only A
   }
   
-  if (optimalRatio === 0) {
-    // Need only B, swap all A to B
+  // Handle special case: only token B needed
+  if (requiredA === BigInt(0) && requiredB > BigInt(0)) {
     if (availableA > BigInt(0)) {
+      // Need to swap all A to B
       return {
         swapFromA: true,
         swapAmount: availableA,
         expectedOutput: BigInt(Math.floor(Number(availableA) * currentPrice)),
       };
     }
-    return null;
+    return null; // Already have only B
   }
   
-  // Calculate current and target values
-  const availableANum = Number(availableA);
-  const availableBNum = Number(availableB);
-  const currentRatio = availableANum / availableBNum;
+  // Both tokens required - calculate value difference
+  const valueDiffA = availableValueA - requiredValueA;
+  const valueDiffB = availableValueB - requiredValueB;
   
-  // If we need more A (current ratio < optimal ratio)
-  if (currentRatio < optimalRatio) {
-    // Swap some B to A
-    // After swap: (availableA + deltaA) / (availableB - deltaB) = optimalRatio
-    // Where deltaA = deltaB / price
-    // Solving: availableA + deltaB/price = optimalRatio * (availableB - deltaB)
-    // availableA + deltaB/price = optimalRatio * availableB - optimalRatio * deltaB
-    // deltaB/price + optimalRatio * deltaB = optimalRatio * availableB - availableA
-    // deltaB * (1/price + optimalRatio) = optimalRatio * availableB - availableA
-    // deltaB = (optimalRatio * availableB - availableA) / (1/price + optimalRatio)
+  // Determine swap direction based on which token we have excess of
+  if (valueDiffA > 0) {
+    // We have excess value in token A, need to swap A → B
+    // Calculate how much A to swap to match required distribution
+    const swapValueNeeded = valueDiffA;
+    const swapAmountA = BigInt(Math.floor(swapValueNeeded / currentPrice));
     
-    const deltaBNum = (optimalRatio * availableBNum - availableANum) / (1 / currentPrice + optimalRatio);
-    
-    if (deltaBNum <= 0 || deltaBNum > availableBNum) {
+    if (swapAmountA <= BigInt(0) || swapAmountA > availableA) {
       return null;
     }
-    
-    const swapAmount = BigInt(Math.floor(deltaBNum));
-    const expectedOutput = BigInt(Math.floor(deltaBNum / currentPrice));
-    
-    return {
-      swapFromA: false,
-      swapAmount,
-      expectedOutput,
-    };
-  } else {
-    // Swap some A to B
-    // After swap: (availableA - deltaA) / (availableB + deltaB) = optimalRatio
-    // Where deltaB = deltaA * price
-    // Solving: availableA - deltaA = optimalRatio * (availableB + deltaA * price)
-    // availableA - deltaA = optimalRatio * availableB + optimalRatio * price * deltaA
-    // availableA - optimalRatio * availableB = deltaA + optimalRatio * price * deltaA
-    // availableA - optimalRatio * availableB = deltaA * (1 + optimalRatio * price)
-    // deltaA = (availableA - optimalRatio * availableB) / (1 + optimalRatio * price)
-    
-    const deltaANum = (availableANum - optimalRatio * availableBNum) / (1 + optimalRatio * currentPrice);
-    
-    if (deltaANum <= 0 || deltaANum > availableANum) {
-      return null;
-    }
-    
-    const swapAmount = BigInt(Math.floor(deltaANum));
-    const expectedOutput = BigInt(Math.floor(deltaANum * currentPrice));
     
     return {
       swapFromA: true,
-      swapAmount,
-      expectedOutput,
+      swapAmount: swapAmountA,
+      expectedOutput: BigInt(Math.floor(Number(swapAmountA) * currentPrice)),
+    };
+  } else if (valueDiffB > 0) {
+    // We have excess value in token B, need to swap B → A
+    // Calculate how much B to swap to match required distribution
+    const swapValueNeeded = valueDiffB;
+    const swapAmountB = BigInt(Math.floor(swapValueNeeded));
+    
+    if (swapAmountB <= BigInt(0) || swapAmountB > availableB) {
+      return null;
+    }
+    
+    return {
+      swapFromA: false,
+      swapAmount: swapAmountB,
+      expectedOutput: BigInt(Math.floor(Number(swapAmountB) / currentPrice)),
     };
   }
+  
+  // No swap needed - balances already match
+  return null;
 }
 
 /**
