@@ -236,7 +236,7 @@ export class RebalanceService {
     
     logger.info('Building atomic PTB with all operations using SDK builders...');
     logger.info('=== COIN OBJECT FLOW TRACE ===');
-    logger.info('Order: create zero coins → collect_fee (side effects) → close_position (side effects) → split zero coins → swap → open → add_liquidity → transfer');
+    logger.info('Order: close_position (capture outputs) → swap → open → add_liquidity → transfer');
     
     // CHECK: Validate position liquidity before building PTB
     const positionHasLiquidity = BigInt(position.liquidity) > BigInt(0);
@@ -272,54 +272,17 @@ export class RebalanceService {
     // ============================================================================
     // COIN TRACE: PTB Command Flow with Explicit Result Labels
     // ============================================================================
-    // Command 0-1: Create zero coins upfront (before any moveCall operations)
-    // This ensures proper command indexing for all subsequent operations
-    // Using coinWithBalance ensures valid CoinObjects even with zero balance
-    logger.info('Creating zero-balance coins for transaction operations...');
-    const zeroCoinA = coinWithBalance({ type: normalizedCoinTypeA, balance: 0, useGasCoin: false })(ptb);  // Command 0: zeroCoinA
-    const zeroCoinB = coinWithBalance({ type: normalizedCoinTypeB, balance: 0, useGasCoin: false })(ptb);  // Command 1: zeroCoinB
-    logger.info('  ✓ Zero coins created (Command 0-1)');
-    
+    // Step 1: Close position (removes liquidity AND closes position NFT)
+    // CORRECT APPROACH: Capture the returned coins from close_position
+    // close_position returns (Coin<CoinTypeA>, Coin<CoinTypeB>) - tuple of 2 coins
+    // These coins contain the actual liquidity from the closed position
     // ============================================================================
-    // Step 1: Collect fees from old position FIRST (before closing)
-    // This is the correct order per Cetus SDK pattern
-    // Use SDK builder pattern: pool_script_v2::collect_fee
-    // 
-    // CRITICAL: collect_fee is called for SIDE EFFECTS ONLY
-    // Its outputs are NOT captured or referenced to avoid SecondaryIndexOutOfBounds
-    // when collect_fee returns zero coins
-    // ============================================================================
-    logger.info('Step 1: Collect fees → called for side effects only (outputs NOT used)');
+    logger.info('Step 1: Close position (removes liquidity & closes NFT) → capturing returned coins');
     
-    // Command 2: collect_fee moveCall
-    // Called for side effects only - returns are NOT used (no NestedResult references)
-    // This ensures transaction succeeds even if collect_fee returns 0 coins
-    ptb.moveCall({
-      target: `${packageId}::pool_script_v2::collect_fee`,
-      typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
-      arguments: [
-        ptb.object(globalConfigId),
-        ptb.object(pool.id),
-        ptb.object(position.id),
-        zeroCoinA,  // Using Command 0
-        zeroCoinB,  // Using Command 1
-      ],
-    });
-    // NOTE: Result is NOT captured or destructured - zero NestedResult[result_idx=2] in PTB
-    logger.info('  ✓ collect_fee called (outputs discarded - side effects only)');
-    
-    // ============================================================================
-    // Step 2: Close position (removes liquidity AND closes position NFT)
-    // Use SDK builder pattern: pool_script::close_position
-    // IMPORTANT: Called for SIDE EFFECTS ONLY - outputs are NOT used
-    // All liquidity comes from zero coin references (Commands 0-1)
-    // ============================================================================
-    logger.info('Step 2: Close position (removes liquidity & closes NFT) → called for side effects only');
-    
-    // Command 3: close_position moveCall
-    // Called for side effects only - returns are NOT used (no NestedResult references)
-    // This ensures transaction succeeds even if close_position returns 0 coins
-    ptb.moveCall({
+    // Command 0: close_position moveCall
+    // IMPORTANT: This returns a tuple (Coin<A>, Coin<B>) containing the position's liquidity
+    // We MUST capture these outputs and use them as the liquidity source
+    const closePositionResult = ptb.moveCall({
       target: `${packageId}::pool_script::close_position`,
       typeArguments: [normalizedCoinTypeA, normalizedCoinTypeB],
       arguments: [
@@ -331,43 +294,24 @@ export class RebalanceService {
         ptb.object(SUI_CLOCK_OBJECT_ID),
       ],
     });
-    // NOTE: Result is NOT captured or destructured - zero NestedResult[result_idx=closePosition] in PTB
-    logger.info('  ✓ close_position called (outputs discarded - side effects only)');
     
-    // ============================================================================
-    // Step 3: Use zero coin references as SOLE LIQUIDITY SOURCE
-    // 
-    // LIQUIDITY STRATEGY:
-    // - collect_fee is called for side effects only (NO outputs used)
-    // - close_position is called for side effects only (NO outputs used)
-    // - Zero coins (Commands 0-1) are split to create stable references
-    // - Transaction succeeds even if collect_fee or close_position return 0 coins
-    // 
-    // Official @mysten/sui Pattern:
-    // 1. Create zero-value coin objects upfront using coinWithBalance
-    // 2. Split zero coins to create stable coin references for downstream operations
-    // 3. Use stable coins directly for swap and add_liquidity operations
-    // 4. No conditional merging - all liquidity flows through zero coin references
-    // ============================================================================
-    logger.info('Step 3: Prepare stable coin references - sole liquidity source');
-    
-    // Create stable coins using splitCoins with zero amounts
-    // These serve as guaranteed-valid coin references for downstream operations
+    // Extract the returned coins from close_position
+    // These coins contain the actual liquidity and will be used for swaps
     const stableCoinA = safeUseNestedResult(
-      ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]),
+      closePositionResult,
       0,
-      'stable coinA reference from splitCoins'
-    );  // Command 4: Create stable coinA reference
+      'coinA from close_position'
+    );  // Command 0, index 0: Coin<CoinTypeA>
     const stableCoinB = safeUseNestedResult(
-      ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]),
-      0,
-      'stable coinB reference from splitCoins'
-    );  // Command 5: Create stable coinB reference
-    logger.info('  ✓ Created stable coin references via splitCoins(zeroCoin, [0])');
-    logger.info('  ✓ Stable coin references ready for swap operations (NO merge operations)');
+      closePositionResult,
+      1,
+      'coinB from close_position'
+    );  // Command 0, index 1: Coin<CoinTypeB>
+    logger.info('  ✓ close_position completed - captured returned coins (Coin<A>, Coin<B>)');
+    logger.info('  ✓ Using close_position outputs as liquidity source for swaps');
     
-    // Step 4: Swap to optimal ratio if needed
-    logger.info('Step 4: Swap to optimal ratio (if needed)');
+    // Step 2: Swap to optimal ratio if needed
+    logger.info('Step 2: Swap to optimal ratio (if needed)');
     const { coinA: swappedCoinA, coinB: swappedCoinB } = this.addSwapIfNeeded(
       ptb,
       pool,
@@ -382,9 +326,9 @@ export class RebalanceService {
     );
     logger.info('  ✓ Final coins ready after swap: swappedCoinA, swappedCoinB');
     
-    // Step 5: Open new position
+    // Step 3: Open new position
     // Use SDK builder pattern with proper tick conversion from SDK's asUintN
-    logger.info('Step 5: Open new position → returns newPosition NFT');
+    logger.info('Step 3: Open new position → returns newPosition NFT');
     
     // Convert signed ticks to u32 using BigInt.asUintN (SDK pattern)
     const tickLowerU32 = Number(BigInt.asUintN(32, BigInt(newRange.tickLower)));
@@ -409,43 +353,35 @@ export class RebalanceService {
     logger.info('  ✓ Captured: newPosition NFT from open_position (single value return)');
     
     // ============================================================================
-    // Step 5.5: Validate coins before add_liquidity_by_fix_coin
-    // Ensure both coinA and coinB exist; use zero coin split as fallback
-    // This prevents add_liquidity_by_fix_coin from receiving invalid coin objects
+    // Step 4: Validate coins before add_liquidity_by_fix_coin
+    // Ensure both coinA and coinB exist from close_position outputs
     // ============================================================================
-    logger.info('Step 5.5: Validate coins for add_liquidity');
+    logger.info('Step 4: Validate coins for add_liquidity');
     
-    // Validate swappedCoinA - if missing or invalid, use zero coin split as fallback
+    // Note: Since we capture coins from close_position, they should always be valid
+    // The swappedCoinA and swappedCoinB come from either:
+    // 1. Direct use of close_position outputs if no swap needed
+    // 2. Swap outputs that merge with close_position outputs
+    // Therefore, the fallback code below should not be needed in normal operation
     let finalCoinA = swappedCoinA;
-    if (!swappedCoinA) {
-      logger.warn('  ⚠ swappedCoinA is missing, using zeroCoin split as fallback');
-      const fallbackCoinA = safeUseNestedResult(
-        ptb.splitCoins(zeroCoinA, [ptb.pure.u64(0)]),
-        0,
-        'fallback coinA from splitCoins'
-      );
-      finalCoinA = fallbackCoinA;
-    }
-    
-    // Validate swappedCoinB - if missing or invalid, use zero coin split as fallback
     let finalCoinB = swappedCoinB;
-    if (!swappedCoinB) {
-      logger.warn('  ⚠ swappedCoinB is missing, using zeroCoin split as fallback');
-      const fallbackCoinB = safeUseNestedResult(
-        ptb.splitCoins(zeroCoinB, [ptb.pure.u64(0)]),
-        0,
-        'fallback coinB from splitCoins'
+    
+    if (!swappedCoinA || !swappedCoinB) {
+      // This should not happen under normal operation since close_position
+      // always returns coins. Log as error if we hit this.
+      throw new Error(
+        `Missing coin after swap: swappedCoinA=${!!swappedCoinA}, swappedCoinB=${!!swappedCoinB}. ` +
+        'This indicates a bug in the swap logic.'
       );
-      finalCoinB = fallbackCoinB;
     }
     
     logger.info('  ✓ Both coins validated: finalCoinA and finalCoinB ready');
     
-    // Step 6: Add liquidity to new position
+    // Step 5: Add liquidity to new position
     // NOTE: Under normal operation, open_position returns a valid position NFT
     // If open_position fails, the entire PTB transaction will revert atomically
     // Use SDK builder pattern: pool_script_v2::add_liquidity_by_fix_coin
-    logger.info('Step 6: Add liquidity → consumes finalCoinA, finalCoinB');
+    logger.info('Step 5: Add liquidity → consumes finalCoinA, finalCoinB');
     
     ptb.moveCall({
       target: `${packageId}::pool_script_v2::add_liquidity_by_fix_coin`,
@@ -464,19 +400,19 @@ export class RebalanceService {
     });
     logger.info('  ✓ Liquidity added, coins consumed');
     
-    // Step 7: Transfer new position NFT to sender
+    // Step 6: Transfer new position NFT to sender
     // NOTE: Direct transferObjects is safe here because:
     // 1. newPosition is a PTB reference (always valid during construction)
     // 2. If open_position fails, the entire PTB reverts atomically
     // 3. Sui PTB framework validates all object references during execution
-    logger.info('Step 7: Transfer newPosition NFT to sender');
+    logger.info('Step 6: Transfer newPosition NFT to sender');
     ptb.transferObjects([newPosition], ptb.pure.address(this.suiClient.getAddress()));
     logger.info('  ✓ Position transferred');
     
     logger.info('=== END COIN OBJECT FLOW TRACE ===');
-    logger.info('Flow: zeroCoin creation → collect_fee (side effects) → close_position (side effects) → split zero coins → swap (if needed) → open → add_liquidity → transfer');
-    logger.info('NO COIN OBJECTS FROM collect_fee OR close_position REFERENCED');
-    logger.info('ALL LIQUIDITY FROM ZERO COIN REFERENCES (Commands 0-1)');
+    logger.info('Flow: close_position (capture outputs) → swap (if needed) → open → add_liquidity → transfer');
+    logger.info('ALL LIQUIDITY FROM close_position RETURNED COINS');
+    logger.info('CORRECT APPROACH: Using actual liquidity coins, not zero coins');
     
     // Add PTB validation: Print commands with detailed info before build
     // Log 'Command ${i}: ${txb.getEffects()}' as requested in problem statement
@@ -486,7 +422,7 @@ export class RebalanceService {
     
     // Validate NestedResult references before building PTB
     // This ensures no NestedResult references a command result index that doesn't exist
-    // CRITICAL: After fix, there should be NO NestedResult[2] references (collect_fee)
+    // After fix: All NestedResult references should point to close_position outputs (Command 0)
     this.validateNestedResultReferences(ptb);
     
     logger.info('✅ PTB Dry-run PASSED - validation complete');
@@ -499,22 +435,16 @@ export class RebalanceService {
    * This prevents invalid PTB construction where a NestedResult references a command
    * that doesn't exist or hasn't been executed yet.
    * 
-   * CRITICAL: After the PTB fix, there should be ZERO NestedResult[2] references,
-   * as command 2 (collect_fee) is called for side effects only.
+   * After the fix: All NestedResult references should point to close_position outputs (Command 0).
    * 
    * @param ptb - The Transaction to validate
    * @throws Error if any NestedResult references an invalid command index (out of bounds or future command)
-   * @throws Error if any NestedResult references collect_fee outputs (command index 2)
    */
   private validateNestedResultReferences(ptb: Transaction): void {
     const ptbData = ptb.getData();
     const totalCommands = ptbData.commands.length;
     
     logger.debug(`Validating NestedResult references in PTB with ${totalCommands} commands`);
-    
-    // Track if we find any NestedResult[2] references (collect_fee)
-    let hasCollectFeeReferences = false;
-    const collectFeeReferences: string[] = [];
     
     // Helper function to recursively check for NestedResult in an object
     const checkForNestedResult = (obj: unknown, currentCommandIdx: number, path: string = ''): void => {
@@ -525,12 +455,6 @@ export class RebalanceService {
       // Check if this is a NestedResult
       if (typeof obj === 'object' && obj !== null && '$kind' in obj && obj.$kind === 'NestedResult' && 'NestedResult' in obj && Array.isArray(obj.NestedResult)) {
         const [commandIndex, resultIndex] = obj.NestedResult;
-        
-        // CRITICAL CHECK: Fail if referencing command 2 (collect_fee)
-        if (commandIndex === 2) {
-          hasCollectFeeReferences = true;
-          collectFeeReferences.push(`${path}: NestedResult[${commandIndex}][${resultIndex}]`);
-        }
         
         // Validate that the referenced command index exists and comes before current command
         if (commandIndex < 0 || commandIndex >= totalCommands) {
@@ -573,20 +497,7 @@ export class RebalanceService {
       checkForNestedResult(cmd, idx, `Command[${idx}]`);
     });
     
-    // CRITICAL: Fail if any NestedResult[2] references found
-    if (hasCollectFeeReferences) {
-      const referenceList = collectFeeReferences.join('\n  - ');
-      throw new Error(
-        `CRITICAL PTB VALIDATION FAILURE: Found ${collectFeeReferences.length} NestedResult[2] reference(s).\n` +
-        `Command 2 (collect_fee) must be called for side effects only with NO output references.\n` +
-        `This violates the invariant: PTB must contain ZERO references to collect_fee outputs.\n\n` +
-        `Found references:\n  - ${referenceList}\n\n` +
-        `Fix: Remove ALL destructuring and mergeCoins operations that source from collect_fee.`
-      );
-    }
-    
     logger.info(`✓ PTB validation passed: all NestedResult references are valid`);
-    logger.info(`✓ ZERO NestedResult[2] references found (collect_fee is side-effects only)`);
   }
   
   
@@ -620,8 +531,8 @@ export class RebalanceService {
       
       // CHECK: Only perform swap if we have liquidity (and thus coins to swap)
       // Per Cetus SDK pattern: don't call swap with zero amounts
-      // If position has no liquidity, we only have collect_fee coins (likely zero)
-      // In this case, skip the swap entirely to avoid referencing empty NestedResult
+      // If position has no liquidity, we have coins from close_position
+      // In this case, skip the swap entirely if coins have zero balance
       if (!positionHasLiquidity) {
         logger.warn('  ⚠ Skipping swap: position has no liquidity, coins likely have zero balance');
         logger.info('  Using coins as-is (no swap performed)');
