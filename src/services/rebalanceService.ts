@@ -15,6 +15,7 @@ import {
   logAddLiquidity,
   SwapDirection
 } from '../utils/botLogger';
+import BN from 'bn.js';
 
 // Fix BigInt JSON serialization
 // @ts-expect-error - Extending BigInt prototype for JSON serialization
@@ -110,7 +111,7 @@ export class RebalanceService {
       let totalValue: number;
       let closedPositionValue: number; // Value after close_position
       let newRange: { tickLower: number; tickUpper: number };
-      let newPositionId: string;
+      let newPositionId: string = '';
       const sqrtPrice = BigInt(pool.currentSqrtPrice);
       
       // Close position - remove 100% liquidity, collect all fees, close NFT
@@ -403,90 +404,16 @@ export class RebalanceService {
         });
       }
       
-      // Open new position
-      // Skip if already completed (state >= POSITION_OPENED)
-      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.POSITION_OPENED)) {
-        logger.info('⏭️  SKIPPING: Position already opened (resuming from saved state)');
-        
-        // Restore data from saved state
-        newPositionId = stateData.newPositionId || '';
-        
-        logger.info(`   Restored newPositionId: ${newPositionId}`);
-        
-        if (!newPositionId) {
-          throw new Error('State indicates position opened but newPositionId not found in state data');
-        }
-        
-        // Set currentPositionId when resuming from state
-        this.currentPositionId = newPositionId;
-        logger.info(`Using runtime position ID from saved state: ${this.currentPositionId}`);
-      } else {
-        currentStage = 'open_position';
-        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
-        
-        // Explicitly invalidate position ID before opening new position
-        this.currentPositionId = undefined;
-        logger.info('Invalidated position ID before opening new position');
-        
-        logger.info('Opening new position...');
-        
-        const openResult = await this.openPosition(
-          pool,
-          newRange.tickLower,
-          newRange.tickUpper
-        );
-        
-        newPositionId = openResult.positionId;
-        
-        // Assign and log the new runtime position ID
-        this.currentPositionId = openResult.positionId;
-        logger.info(`Using new runtime position ID: ${this.currentPositionId}`);
-        
-        // Structured log for position opening
-        logOpenPosition({
-          poolId: pool.id,
-          positionId: newPositionId,
-          tickLower: newRange.tickLower,
-          tickUpper: newRange.tickUpper,
-          success: true,
-          transactionDigest: openResult.digest,
-        });
-        
-        logger.info('=== New Position Created ===');
-        logger.info(`Position ID: ${newPositionId}`);
-        logger.info(`Tick range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
-        logger.info('============================');
-        
-        addSentryBreadcrumb('New position opened', 'rebalance', {
-          oldPositionId: position.id,
-          newPositionId: newPositionId,
-          tickLower: newRange.tickLower,
-          tickUpper: newRange.tickUpper,
-        });
-        
-        // Save state: POSITION_OPENED
-        this.stateManager.saveState({
-          state: RebalanceState.POSITION_OPENED,
-          positionId: position.id,
-          poolId: pool.id,
-          timestamp: new Date().toISOString(),
-          data: {
-            availableA: availableA.toString(),
-            availableB: availableB.toString(),
-            totalValue: totalValue.toString(),
-            tickLower: newRange.tickLower,
-            tickUpper: newRange.tickUpper,
-            newPositionId: newPositionId,
-            swapExecuted: stateData.swapExecuted || false,
-          },
-        });
-      }
-      
-      // Add liquidity to the new position
+      // Open new position AND add liquidity atomically
       // Skip if already completed (state >= LIQUIDITY_ADDED)
+      // Note: We skip POSITION_OPENED state and go directly to LIQUIDITY_ADDED
+      // because the new atomic operation combines both steps
       if (this.stateManager.isStateCompleted(resumeState, RebalanceState.LIQUIDITY_ADDED)) {
-        logger.info('⏭️  SKIPPING: Liquidity already added (resuming from saved state)');
+        logger.info('⏭️  SKIPPING: Position already opened and liquidity added (resuming from saved state)');
         logger.info('   Rebalance was already completed - clearing state');
+        
+        // Restore data from saved state if available
+        newPositionId = stateData.newPositionId || '';
         
         // Clear state and return
         this.stateManager.clearState();
@@ -499,8 +426,31 @@ export class RebalanceService {
         return;
       }
       
-      currentStage = 'add_liquidity';
-      setSentryContext({ poolId: pool.id, positionId: newPositionId, stage: currentStage });
+      // Also check for legacy POSITION_OPENED state (for backward compatibility)
+      if (this.stateManager.isStateCompleted(resumeState, RebalanceState.POSITION_OPENED)) {
+        logger.info('⏭️  SKIPPING: Position already opened (legacy state detected)');
+        logger.info('   Continuing with add liquidity step...');
+        
+        // Restore data from saved state
+        newPositionId = stateData.newPositionId || '';
+        
+        if (!newPositionId) {
+          throw new Error('State indicates position opened but newPositionId not found in state data');
+        }
+        
+        // Set currentPositionId when resuming from state
+        this.currentPositionId = newPositionId;
+        logger.info(`Using runtime position ID from saved state: ${this.currentPositionId}`);
+      } else {
+        currentStage = 'open_position_and_add_liquidity';
+        setSentryContext({ poolId: pool.id, positionId: position.id, stage: currentStage });
+        
+        // Explicitly invalidate position ID before opening new position
+        this.currentPositionId = undefined;
+        logger.info('Invalidated position ID before opening new position');
+        
+        logger.info('Preparing to atomically open position and add liquidity...');
+      }
       
       // =====================================================================
       // CLMM ADD LIQUIDITY ENFORCEMENT LOGIC (SDK-based)
@@ -521,8 +471,11 @@ export class RebalanceService {
         availableB,
         sqrtPrice
       );
-      const targetLiquidityValue = Math.min(closedPositionValue, availableValue);
+      // Clamp to 98% of closed position value for fee + rounding safety
+      const maxAllowedValue = closedPositionValue * 0.98;
+      const targetLiquidityValue = Math.min(maxAllowedValue, availableValue);
       logger.info(`Closed Position Value: ${closedPositionValue.toFixed(6)}`);
+      logger.info(`Max Allowed (98%): ${maxAllowedValue.toFixed(6)}`);
       logger.info(`Available Value: ${availableValue.toFixed(6)}`);
       logger.info(`Target Liquidity Value: ${targetLiquidityValue.toFixed(6)}`);
       logger.info('=================================================');
@@ -735,50 +688,107 @@ export class RebalanceService {
       logger.info(`Value Difference: ${valueDifferencePercent.toFixed(2)}%`);
       logger.info('=======================================');
       
-      // Enforce explicit position ID variable before adding liquidity
-      const positionIdToUse = this.currentPositionId;
-      
-      // Validate that positionIdToUse is defined
-      if (!positionIdToUse) {
-        logger.error('No active position ID available');
-        logger.error('⚠️  ABORTING: Cannot proceed with addLiquidity');
+      // Check if we need to open position + add liquidity atomically
+      // or just add liquidity (for legacy state resume)
+      if (!this.currentPositionId) {
+        // NEW PATH: Open position and add liquidity atomically
+        logger.info('Opening position and adding liquidity atomically...');
+        logger.info(`  Using Token A: ${finalAmountA.toString()}`);
+        logger.info(`  Using Token B: ${finalAmountB.toString()}`);
         
-        // Clear state to return to monitoring
-        this.stateManager.clearState();
+        const atomicResult = await this.openPositionAndAddLiquidity(
+          pool,
+          newRange.tickLower,
+          newRange.tickUpper,
+          finalAmountA,
+          finalAmountB,
+          this.config.maxSlippagePercent
+        );
         
-        return;
+        newPositionId = atomicResult.positionId;
+        
+        // Assign and log the new runtime position ID
+        this.currentPositionId = atomicResult.positionId;
+        logger.info(`New position created with ID: ${this.currentPositionId}`);
+        
+        // Structured logs for both operations
+        logOpenPosition({
+          poolId: pool.id,
+          positionId: newPositionId,
+          tickLower: newRange.tickLower,
+          tickUpper: newRange.tickUpper,
+          success: true,
+          transactionDigest: atomicResult.digest,
+        });
+        
+        logAddLiquidity({
+          positionId: newPositionId,
+          amountA: finalAmountA.toString(),
+          amountB: finalAmountB.toString(),
+          success: true,
+          transactionDigest: atomicResult.digest,
+        });
+        
+        logger.info('=== Position Created and Liquidity Added ===');
+        logger.info(`Position ID: ${newPositionId}`);
+        logger.info(`Tick range: [${newRange.tickLower}, ${newRange.tickUpper}]`);
+        logger.info(`Token A added: ${finalAmountA.toString()}`);
+        logger.info(`Token B added: ${finalAmountB.toString()}`);
+        logger.info('============================================');
+        
+        addSentryBreadcrumb('Position opened and liquidity added atomically', 'rebalance', {
+          oldPositionId: position.id,
+          newPositionId: newPositionId,
+          tickLower: newRange.tickLower,
+          tickUpper: newRange.tickUpper,
+          amountA: finalAmountA.toString(),
+          amountB: finalAmountB.toString(),
+        });
+      } else {
+        // LEGACY PATH: Position already opened, just add liquidity
+        // This handles resume from old POSITION_OPENED state
+        const positionIdToUse = this.currentPositionId;
+        
+        // newPositionId should already be set from state restore at line 435
+        // But ensure it's set for the code below
+        if (!newPositionId && positionIdToUse) {
+          newPositionId = positionIdToUse;
+        }
+        
+        logger.info('Using runtime position ID for addLiquidity (legacy path)');
+        logger.info(`  Position NFT ID: ${positionIdToUse}`);
+        logger.info('  (Resuming from legacy POSITION_OPENED state)');
+        
+        logger.info('Adding liquidity to existing position...');
+        logger.info(`  Using Token A: ${finalAmountA.toString()}`);
+        logger.info(`  Using Token B: ${finalAmountB.toString()}`);
+        
+        // Add liquidity to the position using the position ID directly
+        const liquidityResult = await this.addLiquidity(
+          positionIdToUse,
+          pool,
+          newRange.tickLower,
+          newRange.tickUpper,
+          finalAmountA,
+          finalAmountB,
+          this.config.maxSlippagePercent
+        );
+        
+        // Structured log for liquidity addition
+        logAddLiquidity({
+          positionId: positionIdToUse,
+          amountA: finalAmountA.toString(),
+          amountB: finalAmountB.toString(),
+          success: true,
+          transactionDigest: liquidityResult?.digest,
+        });
+        
+        addSentryBreadcrumb('Liquidity added to position (legacy path)', 'rebalance', {
+          positionId: positionIdToUse,
+          amountA: finalAmountA.toString(),
+          amountB: finalAmountB.toString(),
+        });
       }
-      
-      // Use the position ID directly from runtime memory
-      // DO NOT call getPositionById() here - indexer delay can cause failures
-      // The position ID from openPosition is the NFT object ID we need
-      logger.info('Using runtime position ID for addLiquidity');
-      logger.info(`  Position NFT ID: ${positionIdToUse}`);
-      logger.info('  (NOT fetching from SDK - using transaction result directly)');
-      
-      logger.info('Adding liquidity to position...');
-      logger.info(`  Using Token A: ${finalAmountA.toString()}`);
-      logger.info(`  Using Token B: ${finalAmountB.toString()}`);
-      
-      // Add liquidity to the position using the position ID directly
-      const liquidityResult = await this.addLiquidity(
-        positionIdToUse,
-        pool,
-        newRange.tickLower,
-        newRange.tickUpper,
-        finalAmountA,
-        finalAmountB,
-        this.config.maxSlippagePercent
-      );
-      
-      // Structured log for liquidity addition
-      logAddLiquidity({
-        positionId: newPositionId,
-        amountA: finalAmountA.toString(),
-        amountB: finalAmountB.toString(),
-        success: true,
-        transactionDigest: liquidityResult?.digest,
-      });
       
       // Refresh balances to show what's left (dust)
       const dustA = await this.suiClient.getWalletBalance(pool.coinTypeA);
@@ -986,49 +996,6 @@ export class RebalanceService {
   }
   
   /**
-   * Open a new position using Cetus SDK
-   * Creates position NFT without adding liquidity
-   * @returns Object with position ID and transaction digest
-   */
-  private async openPosition(
-    pool: Pool,
-    tickLower: number,
-    tickUpper: number
-  ): Promise<{ positionId: string; digest?: string }> {
-    const sdk = this.cetusService.getSDK();
-    
-    logger.info('Opening new position...');
-    logger.info(`  Tick range: [${tickLower}, ${tickUpper}]`);
-    logger.info(`  Pool: ${pool.id}`);
-    
-    // Build the open position transaction using Cetus SDK
-    // This creates the position NFT without adding liquidity
-    const tx = await sdk.Position.openPositionTransactionPayload({
-      pool_id: pool.id,
-      coinTypeA: pool.coinTypeA,
-      coinTypeB: pool.coinTypeB,
-      tick_lower: tickLower.toString(),
-      tick_upper: tickUpper.toString(),
-    });
-    
-    // Execute the transaction and wait for confirmation
-    const result = await this.suiClient.executeSDKPayload(tx);
-    
-    // Extract position ID (NFT) from transaction response
-    // The position NFT is created as a new object
-    const positionId = this.extractPositionIdFromResponse(result);
-    
-    if (!positionId) {
-      throw new Error('Failed to extract position ID from transaction response');
-    }
-    
-    logger.info('✅ Position opened successfully');
-    logger.info(`  Position ID: ${positionId}`);
-    
-    return { positionId, digest: result.digest };
-  }
-  
-  /**
    * Extract position ID from transaction response
    * Looks for newly created position NFT object
    */
@@ -1120,5 +1087,92 @@ export class RebalanceService {
     
     logger.info('✅ Liquidity added successfully');
     return { digest: result.digest };
+  }
+  
+  /**
+   * Atomically open position AND add liquidity in a single transaction
+   * This fixes the "owned by other objects" error by combining both operations
+   * Uses createAddLiquidityFixTokenPayload with is_open: true
+   * 
+   * @param pool The pool information
+   * @param tickLower Lower tick of the position range
+   * @param tickUpper Upper tick of the position range
+   * @param amountA Amount of token A to add
+   * @param amountB Amount of token B to add
+   * @param slippagePercent Slippage tolerance percentage
+   * @returns Object with position ID and transaction digest
+   */
+  private async openPositionAndAddLiquidity(
+    pool: Pool,
+    tickLower: number,
+    tickUpper: number,
+    amountA: bigint,
+    amountB: bigint,
+    slippagePercent: number
+  ): Promise<{ positionId: string; digest?: string }> {
+    const sdk = this.cetusService.getSDK();
+    
+    logger.info('Atomically opening position and adding liquidity...');
+    logger.info(`  Tick range: [${tickLower}, ${tickUpper}]`);
+    logger.info(`  Pool: ${pool.id}`);
+    logger.info(`  Amount A: ${amountA.toString()}`);
+    logger.info(`  Amount B: ${amountB.toString()}`);
+    logger.info(`  Slippage: ${slippagePercent}%`);
+    
+    // Determine which token to fix based on amounts
+    // If both amounts are > 0, prefer fixing the one with larger value
+    // If only one amount is > 0, fix that one
+    let fixAmountA: boolean;
+    if (amountA === BigInt(0) && amountB > BigInt(0)) {
+      fixAmountA = false;
+    } else if (amountB === BigInt(0) && amountA > BigInt(0)) {
+      fixAmountA = true;
+    } else {
+      // Both > 0, determine based on value at current price
+      const price = sqrtPriceToPrice(BigInt(pool.currentSqrtPrice));
+      const valueA = Number(amountA) * price;
+      const valueB = Number(amountB);
+      fixAmountA = valueA >= valueB;
+    }
+    
+    logger.info(`  Fix amount A: ${fixAmountA}`);
+    
+    // Build the payload for atomic open + add liquidity
+    const payload = await sdk.Position.createAddLiquidityFixTokenPayload(
+      {
+        coinTypeA: pool.coinTypeA,
+        coinTypeB: pool.coinTypeB,
+        pool_id: pool.id,
+        tick_lower: tickLower.toString(),
+        tick_upper: tickUpper.toString(),
+        fix_amount_a: fixAmountA,
+        amount_a: amountA.toString(),
+        amount_b: amountB.toString(),
+        slippage: slippagePercent,
+        is_open: true,  // KEY: Opens position AND adds liquidity atomically
+        rewarder_coin_types: [],
+        collect_fee: false,
+        pos_id: '',  // Empty string indicates new position (SDK requirement)
+      },
+      {
+        slippage: slippagePercent,
+        curSqrtPrice: new BN(pool.currentSqrtPrice),
+      }
+    );
+    
+    // Execute the transaction and wait for confirmation
+    const result = await this.suiClient.executeSDKPayload(payload);
+    
+    // Extract position ID (NFT) from transaction response
+    const positionId = this.extractPositionIdFromResponse(result);
+    
+    if (!positionId) {
+      throw new Error('Failed to extract position ID from transaction response');
+    }
+    
+    logger.info('✅ Position opened and liquidity added successfully');
+    logger.info(`  Position ID: ${positionId}`);
+    
+    return { positionId, digest: result.digest };
   }
 }
