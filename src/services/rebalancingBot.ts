@@ -2,14 +2,12 @@ import { BotConfig } from '../types';
 import { logger } from '../utils/logger';
 import { SuiClientService } from './suiClient';
 import { CetusService } from './cetusService';
-import { MonitorService } from './monitorService';
 import { RebalanceService } from './rebalanceService';
 
 export class RebalancingBot {
   private config: BotConfig;
   private suiClient: SuiClientService;
   private cetusService: CetusService;
-  private monitorService: MonitorService;
   private rebalanceService: RebalanceService;
   private isRunning: boolean = false;
   private intervalId: NodeJS.Timeout | null = null;
@@ -18,7 +16,6 @@ export class RebalancingBot {
     this.config = config;
     this.suiClient = new SuiClientService(config);
     this.cetusService = new CetusService(this.suiClient, config);
-    this.monitorService = new MonitorService(this.cetusService, config);
     this.rebalanceService = new RebalanceService(
       this.suiClient,
       this.cetusService,
@@ -70,29 +67,20 @@ export class RebalancingBot {
     try {
       logger.info('=== Checking position ===');
       
-      // Generate report
-      const report = await this.monitorService.generateReport();
+      // Fetch pool information
+      const pool = await this.cetusService.getPool();
       
-      // If no position exists, the bot cannot rebalance
-      if (!report.position) {
-        logger.info(`No position to rebalance: ${report.reason}`);
-        return;
-      }
+      logger.info(`Pool: ${pool.id}`);
+      logger.info(`Current tick: ${pool.currentTick}`);
       
-      // Check if rebalancing is needed (based on OUT_OF_RANGE status)
-      if (!report.shouldRebalance) {
-        logger.info(`No rebalancing needed: ${report.reason}`);
-        return;
-      }
+      // Execute rebalance flow
+      // The rebalance service will:
+      // 1. Find all wallet positions for this pool
+      // 2. Check which positions are out of range
+      // 3. Rebalance if needed, or skip if all positions are in range
+      await this.rebalanceService.rebalance(pool);
       
-      logger.warn('⚠️  REBALANCING TRIGGERED');
-      logger.warn(`Reason: ${report.reason}`);
-      logger.warn(`Deviation: ${report.priceDeviation.toFixed(2)}%`);
-      
-      // Execute atomic rebalance
-      await this.rebalanceService.rebalance(report.pool, report.position);
-      
-      logger.info('✅ Rebalance completed successfully');
+      logger.info('✅ Rebalance check completed successfully');
       
     } catch (error) {
       logger.error('Error during check and rebalance', error);

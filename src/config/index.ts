@@ -18,7 +18,6 @@ function getEnvVarWithDefault(name: string, defaultValue: string): string {
 export function loadConfig(): BotConfig {
   const privateKey = getEnvVar('PRIVATE_KEY');
   const poolId = getEnvVar('POOL_ID');
-  const initialPositionId = process.env['POSITION_ID']; // Optional
   
   if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
     throw new Error('Invalid PRIVATE_KEY format. Must be 0x-prefixed 64 hex chars');
@@ -26,11 +25,6 @@ export function loadConfig(): BotConfig {
   
   if (!poolId.startsWith('0x')) {
     throw new Error('Invalid POOL_ID format. Must be 0x-prefixed');
-  }
-  
-  // Validate POSITION_ID format only if provided
-  if (initialPositionId && !initialPositionId.startsWith('0x')) {
-    throw new Error('Invalid POSITION_ID format. Must be 0x-prefixed');
   }
   
   const rpcUrl = getEnvVarWithDefault(
@@ -42,7 +36,6 @@ export function loadConfig(): BotConfig {
     privateKey,
     rpcUrl,
     poolId,
-    initialPositionId,
     rebalanceThresholdPercent: parseFloat(
       getEnvVarWithDefault('REBALANCE_THRESHOLD_PERCENT', '2.0')
     ),
@@ -72,7 +65,6 @@ export function loadConfig(): BotConfig {
     swapRatioTolerancePercent: parseFloat(
       getEnvVarWithDefault('SWAP_RATIO_TOLERANCE_PERCENT', '5.0')
     ),
-    stateFilePath: getEnvVarWithDefault('STATE_FILE_PATH', '.rebalance-state.json'),
   };
   
   return config;
