@@ -29,6 +29,9 @@ BigInt.prototype.toJSON = function() { return this.toString(); };
 // Value-based swap tolerance percentage (1% as per requirements)
 const SWAP_VALUE_TOLERANCE_PERCENT = 1;
 
+// Liquidity safety factor to prevent over-adding liquidity (98% of closed position value)
+const LIQUIDITY_SAFETY_FACTOR = 0.98;
+
 export class RebalanceService {
   private suiClient: SuiClientService;
   private cetusService: CetusService;
@@ -317,8 +320,8 @@ export class RebalanceService {
       logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       
       // STEP 9: ADD LIQUIDITY
-      // Clamp total added value to closedPositionValue * 0.98
-      const maxValueToAdd = closedPositionValue * 0.98;
+      // Clamp total added value to closedPositionValue * LIQUIDITY_SAFETY_FACTOR
+      const maxValueToAdd = closedPositionValue * LIQUIDITY_SAFETY_FACTOR;
       const { totalValue: currentValue } = calculateQuoteValue(
         availableA,
         availableB,
@@ -329,17 +332,19 @@ export class RebalanceService {
       let finalAmountB = availableB;
       
       if (currentValue > maxValueToAdd) {
-        // Scale down proportionally
+        // Scale down proportionally using BigInt arithmetic to avoid precision loss
+        // Convert scale factor to fixed-point integer (multiply by 1M) to maintain precision
         const scaleFactor = maxValueToAdd / currentValue;
-        finalAmountA = BigInt(Math.floor(Number(availableA) * scaleFactor));
-        finalAmountB = BigInt(Math.floor(Number(availableB) * scaleFactor));
+        const scaleFactorFixed = BigInt(Math.floor(scaleFactor * 1000000));
+        finalAmountA = (availableA * scaleFactorFixed) / BigInt(1000000);
+        finalAmountB = (availableB * scaleFactorFixed) / BigInt(1000000);
         
-        logger.info(`Clamping liquidity to ${(0.98 * 100).toFixed(0)}% of closed position value`);
+        logger.info(`Clamping liquidity to ${Math.floor(LIQUIDITY_SAFETY_FACTOR * 100)}% of closed position value`);
         logger.info(`  Scale factor: ${scaleFactor.toFixed(6)}`);
         logger.info(`  Final Token A: ${finalAmountA} (scaled from ${availableA})`);
         logger.info(`  Final Token B: ${finalAmountB} (scaled from ${availableB})`);
       } else {
-        logger.info('Using all available tokens (within 98% limit)');
+        logger.info(`Using all available tokens (within ${Math.floor(LIQUIDITY_SAFETY_FACTOR * 100)}% limit)`);
         logger.info(`  Token A: ${finalAmountA}`);
         logger.info(`  Token B: ${finalAmountB}`);
       }
