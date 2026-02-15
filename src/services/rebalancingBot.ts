@@ -33,16 +33,14 @@ export class RebalancingBot {
     logger.info('Starting rebalancing bot...');
     logger.info('⚠️  AUTOMATED REBALANCING ENABLED');
     logger.info(`Check interval: ${this.config.checkIntervalMs}ms`);
-    logger.info(`Rebalance threshold: ${this.config.rebalanceThresholdPercent}%`);
     logger.info(`Range width: ${this.config.rangeWidthPercent}%`);
-    logger.info(`Max slippage: ${this.config.maxSlippagePercent}%`);
     
     // Run first check immediately
-    await this.checkAndRebalance();
+    await this.checkAndRebalancePositions();
     
     // Schedule periodic checks
     this.intervalId = setInterval(async () => {
-      await this.checkAndRebalance();
+      await this.checkAndRebalancePositions();
     }, this.config.checkIntervalMs);
     
     logger.info('Bot started successfully');
@@ -63,28 +61,43 @@ export class RebalancingBot {
     logger.info('Bot stopped');
   }
   
-  private async checkAndRebalance(): Promise<void> {
+  private async checkAndRebalancePositions(): Promise<void> {
     try {
-      logger.info('=== Checking position ===');
+      logger.info('=== Checking positions ===');
       
-      // Fetch pool information
-      const pool = await this.cetusService.getPool();
+      // Get all positions with liquidity
+      const positions = await this.cetusService.getPositionsWithLiquidity();
       
-      logger.info(`Pool: ${pool.id}`);
-      logger.info(`Current tick: ${pool.currentTick}`);
+      if (positions.length === 0) {
+        logger.info('No positions with liquidity found');
+        return;
+      }
       
-      // Execute rebalance flow
-      // The rebalance service will:
-      // 1. Find all wallet positions for this pool
-      // 2. Check which positions are out of range
-      // 3. Rebalance if needed, or skip if all positions are in range
-      await this.rebalanceService.rebalance(pool);
+      logger.info(`Found ${positions.length} position(s) with liquidity`);
       
-      logger.info('✅ Rebalance check completed successfully');
+      // Check and rebalance each position
+      for (const position of positions) {
+        try {
+          // Get pool data for this position
+          const pool = await this.cetusService.getPool(position.poolId);
+          
+          logger.info(`Checking position ${position.id} in pool ${pool.id}`);
+          logger.info(`Current tick: ${pool.currentTick}, Position range: [${position.tickLower}, ${position.tickUpper}]`);
+          
+          // Check and rebalance if needed
+          await this.rebalanceService.checkAndRebalance(position, pool);
+          
+        } catch (error) {
+          logger.error(`Error processing position ${position.id}:`, error);
+          // Continue with next position
+        }
+      }
+      
+      logger.info('✅ Check completed');
       
     } catch (error) {
-      logger.error('Error during check and rebalance', error);
-      // Continue running - don't crash the bot on errors
+      logger.error('Error during position check:', error);
+      // Don't crash the bot, continue running
     }
   }
 }

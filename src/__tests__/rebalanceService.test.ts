@@ -1,23 +1,34 @@
 /**
- * Tests for RebalanceService
+ * Integration tests for RebalanceService
+ * Tests the simple zap-based rebalancing logic
  */
 
-import { RebalanceService } from '../services/rebalanceService';
-import { BotConfig, Pool } from '../types';
+import { BotConfig, Pool, Position } from '../types';
 import { logger } from '../utils/logger';
 
-// Mock dependencies
+// Mock external dependencies
+jest.mock('@cetusprotocol/cetus-sui-clmm-sdk', () => ({
+  initMainnetSDK: jest.fn().mockReturnValue({
+    Position: {
+      closePositionTransactionPayload: jest.fn(),
+      openPositionTransactionPayload: jest.fn(),
+      createAddLiquidityFixTokenPayload: jest.fn(),
+    },
+    senderAddress: '',
+  }),
+}));
+
+jest.mock('../services/suiClient');
 jest.mock('../utils/logger');
 jest.mock('../utils/sentry');
-jest.mock('../utils/botLogger');
 
-describe('RebalanceService', () => {
-  let rebalanceService: RebalanceService;
-  let mockSuiClient: any;
-  let mockCetusService: any;
+import { RebalanceService } from '../services/rebalanceService';
+
+describe('RebalanceService Integration Tests', () => {
   let mockConfig: BotConfig;
   let mockPool: Pool;
-  let mockSDK: any;
+  let mockSuiClient: any;
+  let mockCetusService: any;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -25,301 +36,144 @@ describe('RebalanceService', () => {
     mockConfig = {
       privateKey: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
       rpcUrl: 'https://fullnode.mainnet.sui.io:443',
-      poolId: '0xpool123',
-      rebalanceThresholdPercent: 2.0,
-      rangeWidthPercent: 5.0,
+      network: 'mainnet',
       checkIntervalMs: 60000,
-      maxSlippagePercent: 1.0,
-      maxGasPrice: 1000000000,
-      minRetryDelayMs: 1000,
-      maxRetryDelayMs: 30000,
-      maxRetries: 3,
-      swapRatioTolerancePercent: 5.0,
+      rangeWidthPercent: 5.0,
     };
 
     mockPool = {
       id: '0xpool123',
-      coinTypeA: '0xTokenA',
-      coinTypeB: '0xTokenB',
-      currentSqrtPrice: '1000000000000000000',
-      currentTick: 100,
+      coinTypeA: '0x2::sui::SUI',
+      coinTypeB: '0xtoken::usdc::USDC',
+      currentTick: 12000,
       tickSpacing: 10,
-      feeRate: 3000,
-    };
-
-    mockSDK = {
-      Position: {
-        getPositionById: jest.fn(),
-        closePositionTransactionPayload: jest.fn().mockResolvedValue({}),
-        createAddLiquidityFixTokenPayload: jest.fn().mockResolvedValue({}),
-      },
-      Swap: {
-        createSwapTransactionPayload: jest.fn().mockResolvedValue({}),
-      },
     };
 
     mockSuiClient = {
-      getWalletPositions: jest.fn(),
-      getWalletBalance: jest.fn().mockResolvedValue(BigInt('1000000')),
-      executeSDKPayload: jest.fn(),
-      checkGasPrice: jest.fn().mockResolvedValue(undefined),
+      getAddress: jest.fn().mockReturnValue('0xwalletaddress'),
+      executeTransaction: jest.fn().mockResolvedValue({
+        digest: '0xtxdigest',
+        effects: { status: { status: 'success' } },
+        objectChanges: [
+          {
+            type: 'created',
+            objectType: '0x::position::Position',
+            objectId: '0xnewposition123',
+          },
+        ],
+      }),
+      getWalletBalance: jest.fn().mockResolvedValue(BigInt(1000000)),
     };
 
     mockCetusService = {
-      getSDK: jest.fn().mockReturnValue(mockSDK),
-      getPool: jest.fn().mockResolvedValue(mockPool),
+      getSDK: jest.fn().mockReturnValue({
+        Position: {
+          closePositionTransactionPayload: jest.fn().mockResolvedValue({}),
+          openPositionTransactionPayload: jest.fn().mockResolvedValue({}),
+          createAddLiquidityFixTokenPayload: jest.fn().mockResolvedValue({}),
+        },
+      }),
+      isPositionInRange: jest.fn(),
+      calculateNewRange: jest.fn().mockReturnValue({
+        tickLower: 11500,
+        tickUpper: 12500,
+      }),
     };
-
-    rebalanceService = new RebalanceService(
-      mockSuiClient,
-      mockCetusService,
-      mockConfig
-    );
   });
 
-  /**
-   * TEST 1: Wallet has NO positions
-   */
-  it('TEST 1: should exit safely when wallet has no positions', async () => {
-    mockSuiClient.getWalletPositions.mockResolvedValue([]);
+  describe('TEST 1: Position IN_RANGE', () => {
+    it('should not rebalance when position is in range', async () => {
+      const position: Position = {
+        id: '0xposition123',
+        poolId: '0xpool123',
+        liquidity: '1000000',
+        coinTypeA: '0x2::sui::SUI',
+        coinTypeB: '0xtoken::usdc::USDC',
+        tickLower: 11000,
+        tickUpper: 13000,
+      };
 
-    await rebalanceService.rebalance(mockPool);
+      mockCetusService.isPositionInRange.mockReturnValue(true);
 
-    expect(mockSuiClient.getWalletPositions).toHaveBeenCalledTimes(1);
-    expect(mockSDK.Position.getPositionById).not.toHaveBeenCalled();
-    expect(mockSuiClient.executeSDKPayload).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith('No positions found in wallet - nothing to rebalance');
+      const rebalanceService = new RebalanceService(
+        mockSuiClient,
+        mockCetusService,
+        mockConfig
+      );
+
+      await rebalanceService.checkAndRebalance(position, mockPool);
+
+      // Should log IN_RANGE
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('IN_RANGE'));
+
+      // Should NOT execute any transactions
+      expect(mockSuiClient.executeTransaction).not.toHaveBeenCalled();
+    });
   });
 
-  /**
-   * TEST 2: Wallet has position IN RANGE
-   */
-  it('TEST 2: should do nothing when all positions are in range', async () => {
-    const positionId = '0xposition123';
-    mockSuiClient.getWalletPositions.mockResolvedValue([positionId]);
+  describe('TEST 2: Position OUT_OF_RANGE', () => {
+    it('should rebalance when position is out of range', async () => {
+      const position: Position = {
+        id: '0xposition123',
+        poolId: '0xpool123',
+        liquidity: '1000000',
+        coinTypeA: '0x2::sui::SUI',
+        coinTypeB: '0xtoken::usdc::USDC',
+        tickLower: 10000,
+        tickUpper: 11000,
+      };
 
-    mockSDK.Position.getPositionById.mockResolvedValue({
-      pos_object_id: positionId,
-      pool: mockPool.id,
-      tick_lower_index: 50,
-      tick_upper_index: 150,
-      liquidity: '1000000',
-      coin_type_a: mockPool.coinTypeA,
-      coin_type_b: mockPool.coinTypeB,
+      mockCetusService.isPositionInRange.mockReturnValue(false);
+
+      const rebalanceService = new RebalanceService(
+        mockSuiClient,
+        mockCetusService,
+        mockConfig
+      );
+
+      await rebalanceService.checkAndRebalance(position, mockPool);
+
+      // Should log OUT_OF_RANGE
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('OUT_OF_RANGE'));
+
+      // Should execute transactions:
+      // 1. Close position
+      // 2. Open new position
+      // 3. Add liquidity
+      expect(mockSuiClient.executeTransaction).toHaveBeenCalledTimes(3);
+
+      // Should log success
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Rebalance completed'));
     });
-
-    await rebalanceService.rebalance(mockPool);
-
-    expect(mockSDK.Position.getPositionById).toHaveBeenCalledTimes(1);
-    expect(mockSDK.Position.closePositionTransactionPayload).not.toHaveBeenCalled();
-    expect(mockSuiClient.executeSDKPayload).not.toHaveBeenCalled();
-    expect(logger.info).toHaveBeenCalledWith('All positions are IN_RANGE - no rebalance needed');
   });
 
-  /**
-   * TEST 3: Wallet has position OUT OF RANGE
-   */
-  it('TEST 3: should execute full rebalance when position is out of range', async () => {
-    const oldPositionId = '0xposition123';
-    const newPositionId = '0xnewposition456';
-    
-    mockSuiClient.getWalletPositions.mockResolvedValue([oldPositionId]);
+  describe('TEST 3: Rebalance with error', () => {
+    it('should handle rebalance errors gracefully', async () => {
+      const position: Position = {
+        id: '0xposition123',
+        poolId: '0xpool123',
+        liquidity: '1000000',
+        coinTypeA: '0x2::sui::SUI',
+        coinTypeB: '0xtoken::usdc::USDC',
+        tickLower: 10000,
+        tickUpper: 11000,
+      };
 
-    mockSDK.Position.getPositionById.mockResolvedValue({
-      pos_object_id: oldPositionId,
-      pool: mockPool.id,
-      tick_lower_index: 200,
-      tick_upper_index: 300,
-      liquidity: '1000000',
-      coin_type_a: mockPool.coinTypeA,
-      coin_type_b: mockPool.coinTypeB,
+      mockCetusService.isPositionInRange.mockReturnValue(false);
+      mockSuiClient.executeTransaction.mockRejectedValueOnce(new Error('Transaction failed'));
+
+      const rebalanceService = new RebalanceService(
+        mockSuiClient,
+        mockCetusService,
+        mockConfig
+      );
+
+      await expect(
+        rebalanceService.checkAndRebalance(position, mockPool)
+      ).rejects.toThrow('Transaction failed');
+
+      // Should log error
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Rebalance failed'), expect.any(Error));
     });
-
-    let callCount = 0;
-    mockSuiClient.executeSDKPayload.mockImplementation(() => {
-      callCount++;
-      if (callCount === 1) {
-        return Promise.resolve({ digest: '0xtxn1' });
-      } else {
-        return Promise.resolve({
-          digest: '0xtxn2',
-          objectChanges: [{
-            type: 'created',
-            objectType: '0x::position::Position',
-            objectId: newPositionId,
-          }],
-        });
-      }
-    });
-
-    await rebalanceService.rebalance(mockPool);
-
-    expect(mockSDK.Position.closePositionTransactionPayload).toHaveBeenCalled();
-    expect(mockSDK.Position.createAddLiquidityFixTokenPayload).toHaveBeenCalled();
-    expect(mockSuiClient.executeSDKPayload).toHaveBeenCalledTimes(2);
-  });
-
-  /**
-   * TEST 4: Wallet only has one token after close
-   */
-  it('TEST 4: should execute swap when only one token is available', async () => {
-    const oldPositionId = '0xposition123';
-    const newPositionId = '0xnewposition456';
-    
-    mockSuiClient.getWalletPositions.mockResolvedValue([oldPositionId]);
-
-    mockSDK.Position.getPositionById.mockResolvedValue({
-      pos_object_id: oldPositionId,
-      pool: mockPool.id,
-      tick_lower_index: 200,
-      tick_upper_index: 300,
-      liquidity: '1000000',
-      coin_type_a: mockPool.coinTypeA,
-      coin_type_b: mockPool.coinTypeB,
-    });
-
-    let callCount = 0;
-    mockSuiClient.executeSDKPayload.mockImplementation(() => {
-      callCount++;
-      if (callCount === 1) {
-        return Promise.resolve({ digest: '0xtxn1' });
-      } else if (callCount === 2) {
-        return Promise.resolve({ digest: '0xtxnSwap' });
-      } else {
-        return Promise.resolve({
-          digest: '0xtxn2',
-          objectChanges: [{
-            type: 'created',
-            objectType: '0x::position::Position',
-            objectId: newPositionId,
-          }],
-        });
-      }
-    });
-
-    mockSuiClient.getWalletBalance
-      .mockResolvedValueOnce(BigInt('2000000'))
-      .mockResolvedValueOnce(BigInt('0'))
-      .mockResolvedValueOnce(BigInt('1000000'))
-      .mockResolvedValueOnce(BigInt('1000000'));
-
-    await rebalanceService.rebalance(mockPool);
-
-    expect(mockSDK.Swap.createSwapTransactionPayload).toHaveBeenCalled();
-    expect(mockSuiClient.executeSDKPayload).toHaveBeenCalledTimes(3);
-  });
-
-  /**
-   * TEST 5: Wallet balances match required ratio
-   */
-  it('TEST 5: should skip swap when balances match required ratio', async () => {
-    const oldPositionId = '0xposition123';
-    const newPositionId = '0xnewposition456';
-    
-    mockSuiClient.getWalletPositions.mockResolvedValue([oldPositionId]);
-
-    mockSDK.Position.getPositionById.mockResolvedValue({
-      pos_object_id: oldPositionId,
-      pool: mockPool.id,
-      tick_lower_index: 200,
-      tick_upper_index: 300,
-      liquidity: '1000000',
-      coin_type_a: mockPool.coinTypeA,
-      coin_type_b: mockPool.coinTypeB,
-    });
-
-    let callCount = 0;
-    mockSuiClient.executeSDKPayload.mockImplementation(() => {
-      callCount++;
-      if (callCount === 1) {
-        return Promise.resolve({ digest: '0xtxn1' });
-      } else {
-        return Promise.resolve({
-          digest: '0xtxn2',
-          objectChanges: [{
-            type: 'created',
-            objectType: '0x::position::Position',
-            objectId: newPositionId,
-          }],
-        });
-      }
-    });
-
-    await rebalanceService.rebalance(mockPool);
-
-    expect(mockSDK.Swap.createSwapTransactionPayload).not.toHaveBeenCalled();
-    expect(mockSuiClient.executeSDKPayload).toHaveBeenCalledTimes(2);
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Swap is NOT REQUIRED'));
-  });
-
-  /**
-   * TEST 6: addLiquidity validation failure
-   */
-  it('TEST 6: should abort safely when both token amounts are zero', async () => {
-    const oldPositionId = '0xposition123';
-    
-    mockSuiClient.getWalletPositions.mockResolvedValue([oldPositionId]);
-
-    mockSDK.Position.getPositionById.mockResolvedValue({
-      pos_object_id: oldPositionId,
-      pool: mockPool.id,
-      tick_lower_index: 200,
-      tick_upper_index: 300,
-      liquidity: '1000000',
-      coin_type_a: mockPool.coinTypeA,
-      coin_type_b: mockPool.coinTypeB,
-    });
-
-    mockSuiClient.executeSDKPayload.mockResolvedValue({ digest: '0xtxn1' });
-    mockSuiClient.getWalletBalance.mockResolvedValue(BigInt('0'));
-
-    await expect(rebalanceService.rebalance(mockPool)).rejects.toThrow(
-      'Cannot add liquidity: both token amounts are zero'
-    );
-
-    expect(mockSDK.Position.createAddLiquidityFixTokenPayload).not.toHaveBeenCalled();
-  });
-
-  /**
-   * TEST 7: Indexer delay after mint
-   */
-  it('TEST 7: should not call getPositionById after opening position', async () => {
-    const oldPositionId = '0xposition123';
-    const newPositionId = '0xnewposition456';
-    
-    mockSuiClient.getWalletPositions.mockResolvedValue([oldPositionId]);
-
-    mockSDK.Position.getPositionById.mockResolvedValueOnce({
-      pos_object_id: oldPositionId,
-      pool: mockPool.id,
-      tick_lower_index: 200,
-      tick_upper_index: 300,
-      liquidity: '1000000',
-      coin_type_a: mockPool.coinTypeA,
-      coin_type_b: mockPool.coinTypeB,
-    });
-
-    let callCount = 0;
-    mockSuiClient.executeSDKPayload.mockImplementation(() => {
-      callCount++;
-      if (callCount === 1) {
-        return Promise.resolve({ digest: '0xtxn1' });
-      } else {
-        return Promise.resolve({
-          digest: '0xtxn2',
-          objectChanges: [{
-            type: 'created',
-            objectType: '0x::position::Position',
-            objectId: newPositionId,
-          }],
-        });
-      }
-    });
-
-    await rebalanceService.rebalance(mockPool);
-
-    expect(mockSDK.Position.getPositionById).toHaveBeenCalledTimes(1);
-    expect(mockSDK.Position.getPositionById).toHaveBeenCalledWith(oldPositionId);
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining(newPositionId));
   });
 });
