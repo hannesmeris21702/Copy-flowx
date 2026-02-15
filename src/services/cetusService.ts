@@ -110,42 +110,8 @@ export class CetusService {
   }
   
   async getPosition(): Promise<Position | null> {
-    // If initial position ID is configured, use it
-    if (this.config.initialPositionId) {
-      try {
-        return await withRetry(
-          async () => {
-            const positionData = await this.sdk.Position.getPositionById(
-              this.config.initialPositionId!
-            );
-            
-            if (!positionData) {
-              throw new Error(`Position ${this.config.initialPositionId} not found`);
-            }
-            
-            return {
-              id: positionData.pos_object_id,
-              poolId: positionData.pool,
-              tickLower: positionData.tick_lower_index,
-              tickUpper: positionData.tick_upper_index,
-              liquidity: positionData.liquidity,
-              coinA: positionData.coin_type_a,
-              coinB: positionData.coin_type_b,
-            };
-          },
-          this.config.maxRetries,
-          this.config.minRetryDelayMs,
-          this.config.maxRetryDelayMs,
-          'Get position'
-        );
-      } catch (error) {
-        logger.error('Failed to get position', error);
-        throw error;
-      }
-    }
-    
-    // If no initial position ID is configured, scan wallet positions for the pool
-    logger.info('No POSITION_ID configured, scanning wallet positions...');
+    // Scan wallet positions for the pool
+    logger.info('Scanning wallet positions...');
     
     try {
       // Get all position NFT IDs from wallet
@@ -159,8 +125,6 @@ export class CetusService {
       logger.info(`Found ${positionIds.length} position(s) in wallet, checking for pool ${this.config.poolId}...`);
       
       // Fetch all position data in parallel for performance
-      // Note: Most wallets have only a few positions, making parallel fetching reasonable
-      // If rate limiting becomes an issue, consider batching with p-limit or similar
       const positionDataPromises = positionIds.map(async (positionId) => {
         try {
           const positionData = await this.sdk.Position.getPositionById(positionId);
@@ -187,8 +151,6 @@ export class CetusService {
         }
         
         // Check if position has liquidity
-        // The liquidity field from the SDK is a string representing a u128 integer
-        // We need to check if it's greater than 0
         try {
           const liquidityValue = BigInt(positionData.liquidity);
           if (liquidityValue <= 0n) {
