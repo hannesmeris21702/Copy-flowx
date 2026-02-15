@@ -133,7 +133,11 @@ export class RebalanceService {
       
     } catch (error) {
       logger.error('❌ Rebalance failed:', error);
-      logger.error('Position remains closed. Manual intervention may be required.');
+      logger.error('Position has been closed but new position was not created.');
+      logger.error('Manual intervention required:');
+      logger.error('1. Check wallet balances for returned tokens');
+      logger.error('2. Manually create a new position via Cetus UI');
+      logger.error('3. Or wait for the next rebalance cycle to retry');
       throw error;
     }
   }

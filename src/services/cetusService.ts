@@ -102,16 +102,24 @@ export class CetusService {
   
   /**
    * Calculate new tick range based on current tick and range width
+   * 
+   * This uses a simplified approach where range width percentage is converted
+   * to an approximate tick offset. The multiplier (1000) is an approximation
+   * based on typical CLMM tick spacing and price ranges.
+   * 
+   * Note: This is intentionally simple. The SDK will handle the exact amounts
+   * when adding liquidity via zap.
    */
   calculateNewRange(currentTick: number, rangeWidthPercent: number, tickSpacing: number): { tickLower: number; tickUpper: number } {
-    // Calculate tick range based on percentage
-    // Using simple approach: +/- (rangeWidthPercent / 2) from current tick
-    const halfRange = Math.floor((rangeWidthPercent / 100) * 1000); // Approximate tick range
+    // Approximate tick range from percentage
+    // Using a simple multiplier for rough tick calculation
+    const TICK_APPROXIMATION_MULTIPLIER = 1000;
+    const halfRange = Math.floor((rangeWidthPercent / 100) * TICK_APPROXIMATION_MULTIPLIER);
     
     let tickLower = currentTick - halfRange;
     let tickUpper = currentTick + halfRange;
     
-    // Round to nearest tick spacing
+    // Round to nearest tick spacing (required by protocol)
     tickLower = Math.floor(tickLower / tickSpacing) * tickSpacing;
     tickUpper = Math.ceil(tickUpper / tickSpacing) * tickSpacing;
     
