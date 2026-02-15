@@ -1,5 +1,6 @@
-import { SuiClient } from '@mysten/sui/client';
+import { SuiClient, SuiTransactionBlockResponse } from '@mysten/sui/client';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
 import { BotConfig } from '../types';
 import { logger } from '../utils/logger';
 import { withRetry } from '../utils/retry';
@@ -28,8 +29,43 @@ export class SuiClientService {
     return this.client;
   }
   
+  getKeypair(): Ed25519Keypair {
+    return this.keypair;
+  }
+  
   getAddress(): string {
     return this.keypair.getPublicKey().toSuiAddress();
+  }
+  
+  /**
+   * Execute a transaction payload from Cetus SDK
+   */
+  async executeTransaction(payload: Transaction): Promise<SuiTransactionBlockResponse> {
+    try {
+      logger.info('Executing transaction...');
+      
+      const result = await this.client.signAndExecuteTransaction({
+        transaction: payload,
+        signer: this.keypair,
+        options: {
+          showEffects: true,
+          showEvents: true,
+          showObjectChanges: true,
+        },
+      });
+      
+      if (result.effects?.status.status !== 'success') {
+        throw new Error(
+          `Transaction failed: ${result.effects?.status.error || 'Unknown error'}`
+        );
+      }
+      
+      logger.info(`✓ Transaction successful. Digest: ${result.digest}`);
+      return result;
+    } catch (error) {
+      logger.error('Transaction execution failed', error);
+      throw error;
+    }
   }
   
   /**

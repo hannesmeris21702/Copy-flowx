@@ -34,6 +34,8 @@ describe('PositionScanner Integration Tests', () => {
       privateKey: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
       rpcUrl: 'https://fullnode.mainnet.sui.io:443',
       network: 'mainnet',
+      checkIntervalMs: 60000,
+      rangeWidthPercent: 5.0,
     };
   });
 

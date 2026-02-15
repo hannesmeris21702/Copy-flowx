@@ -29,10 +29,21 @@ export function loadConfig(): BotConfig {
 
   const network = getEnvVarWithDefault('NETWORK', 'mainnet');
   
+  const checkIntervalMs = parseInt(
+    getEnvVarWithDefault('CHECK_INTERVAL_MS', '60000'),
+    10
+  );
+  
+  const rangeWidthPercent = parseFloat(
+    getEnvVarWithDefault('RANGE_WIDTH_PERCENT', '5.0')
+  );
+  
   const config: BotConfig = {
     privateKey,
     rpcUrl,
     network,
+    checkIntervalMs,
+    rangeWidthPercent,
   };
   
   return config;
@@ -48,5 +59,14 @@ export function validateConfig(config: BotConfig): void {
   const validNetworks = ['mainnet', 'testnet', 'devnet', 'localnet'];
   if (!validNetworks.includes(config.network)) {
     throw new Error(`NETWORK must be one of: ${validNetworks.join(', ')}`);
+  }
+  
+  // Validate intervals and percentages
+  if (config.checkIntervalMs < 1000) {
+    throw new Error('CHECK_INTERVAL_MS must be at least 1000ms');
+  }
+  
+  if (config.rangeWidthPercent <= 0 || config.rangeWidthPercent > 100) {
+    throw new Error('RANGE_WIDTH_PERCENT must be between 0 and 100');
   }
 }

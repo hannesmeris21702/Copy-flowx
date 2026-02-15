@@ -68,6 +68,8 @@ export class PositionScanner {
             liquidity: positionData.liquidity,
             coinTypeA: positionData.coin_type_a,
             coinTypeB: positionData.coin_type_b,
+            tickLower: positionData.tick_lower_index,
+            tickUpper: positionData.tick_upper_index,
           });
         } catch (error) {
           logger.warn(`Invalid liquidity value for position ${positionId}: ${positionData.liquidity}`);
