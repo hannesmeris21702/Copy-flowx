@@ -471,8 +471,11 @@ export class RebalanceService {
         availableB,
         sqrtPrice
       );
-      const targetLiquidityValue = Math.min(closedPositionValue, availableValue);
+      // Clamp to 98% of closed position value for fee + rounding safety
+      const maxAllowedValue = closedPositionValue * 0.98;
+      const targetLiquidityValue = Math.min(maxAllowedValue, availableValue);
       logger.info(`Closed Position Value: ${closedPositionValue.toFixed(6)}`);
+      logger.info(`Max Allowed (98%): ${maxAllowedValue.toFixed(6)}`);
       logger.info(`Available Value: ${availableValue.toFixed(6)}`);
       logger.info(`Target Liquidity Value: ${targetLiquidityValue.toFixed(6)}`);
       logger.info('=================================================');
